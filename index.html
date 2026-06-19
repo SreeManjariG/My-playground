@@ -1,0 +1,1079 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#fbf4e4" />
+  <title>The Quiet Cottage</title>
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%23fbf4e4'/%3E%3Cpath d='M20 55 Q50 20 80 55 Z' fill='%23c9904a'/%3E%3Crect x='28' y='52' width='44' height='32' fill='%23f0e2c6'/%3E%3C/svg%3E" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #fbf4e4; -webkit-text-size-adjust: 100%; }
+    #root { padding: 12px 8px 32px; min-height: 100vh; box-sizing: border-box; }
+    .boot { font-family: Georgia, serif; color: #9a866f; text-align: center; padding: 60px 20px; }
+  </style>
+</head>
+<body>
+  <div id="root"><div class="boot">Opening the cottage…</div></div>
+
+  <!-- error overlay so failures are visible instead of an endless loading screen -->
+  <script>
+    window.__err = function (msg) {
+      var r = document.getElementById('root');
+      if (r) r.innerHTML = '<div style="font-family:Georgia,serif;color:#8a4a3a;padding:40px 22px;line-height:1.6;max-width:520px;margin:0 auto">'
+        + '<div style="font-size:18px;font-style:italic;margin-bottom:10px">The cottage could not open</div>'
+        + '<div style="font-size:13px;color:#9a866f">' + msg + '</div>'
+        + '<div style="font-size:12px;color:#b0a088;margin-top:16px">Tip: open this in a normal browser (Safari / Chrome) with an internet connection, not inside an email or app preview.</div></div>';
+    };
+    window.addEventListener('error', function (e) {
+      if (window.__booted) return;
+      window.__err((e && e.message) ? e.message : 'A script error occurred.');
+    });
+  </script>
+
+  <!-- React + Babel from CDN, with a jsDelivr fallback if unpkg is blocked -->
+  <script>
+    function loadScript(urls, cb) {
+      var i = 0;
+      (function next() {
+        if (i >= urls.length) { window.__err('Could not download a required library (' + urls[0] + '). Check your connection or content blocker.'); return; }
+        var s = document.createElement('script');
+        s.src = urls[i]; s.crossOrigin = 'anonymous';
+        s.onload = cb;
+        s.onerror = function () { i++; next(); };
+        document.head.appendChild(s);
+      })();
+    }
+    loadScript(
+      ['https://unpkg.com/react@18/umd/react.production.min.js',
+       'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js'],
+      function () {
+        loadScript(
+          ['https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
+           'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js'],
+          function () {
+            loadScript(
+              ['https://unpkg.com/@babel/standalone/babel.min.js',
+               'https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js'],
+              function () {
+                if (!window.React || !window.ReactDOM || !window.Babel) {
+                  window.__err('Libraries loaded but did not initialize. Try refreshing.');
+                  return;
+                }
+                // run the app code (stored in the template script tag below)
+                try {
+                  var code = document.getElementById('app-code').textContent;
+                  var out = Babel.transform(code, { presets: [['react', { runtime: 'classic' }]], sourceType: 'script' }).code;
+                  (0, eval)(out);
+                  window.__booted = true;
+                } catch (err) {
+                  window.__err((err && err.message) ? err.message : String(err));
+                }
+              });
+          });
+      });
+  </script>
+
+  <script type="text/plain" id="app-code">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ============================================================
+   QUEST ROOM — a pixel-art bedroom that evolves as you work.
+   Gatcha mechanic: tasks get secret hidden numbers 1..n.
+   You pick a number, get a surprise task, complete or reshuffle.
+   ============================================================ */
+
+const SECTIONS = {
+  reading:      { label: "Reading",      color: "#c9a06b", glyph: "book",   reward: "a book on the shelf" },
+  business:     { label: "Business",     color: "#7bc47b", glyph: "coin",   reward: "money of your choice in the piggy bank" },
+  relationships:{ label: "Relationships",color: "#e08aa8", glyph: "plant",  reward: "a flower or vegetable in the garden" },
+  fitness:      { label: "Fitness",      color: "#e0b84a", glyph: "medal",  reward: "100 XP toward a trophy" },
+  environment:  { label: "Environment",  color: "#79c6e0", glyph: "light",  reward: "fairy lights on the wall" },
+};
+const SECTION_KEYS = Object.keys(SECTIONS);
+
+const STORE_KEY = "questroom:v1";
+
+const blankState = () => ({
+  tasks: [],            // {id, text, section}
+  shuffle: [],          // array of task ids, index = (number-1)
+  books: [],            // {title}
+  coins: 0,
+  plants: 0,
+  xp: 0,
+  lights: 0,
+  history: [],          // completed task texts (recent first)
+});
+
+let _id = 0;
+const uid = () => `t${Date.now()}_${_id++}`;
+
+function shuffleArray(a) {
+  const arr = [...a];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function QuestRoom() {
+  const [state, setState] = useState(blankState());
+  const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState("room"); // room | add | gatcha
+  const [draftText, setDraftText] = useState("");
+  const [draftSection, setDraftSection] = useState("reading");
+  const [pick, setPick] = useState("");
+  const [drawn, setDrawn] = useState(null); // currently drawn task id
+  const [flash, setFlash] = useState(null); // {section} celebration
+  const [reward, setReward] = useState(null); // pending reward form
+  const [rewardInput, setRewardInput] = useState("");
+  const [inside, setInside] = useState(false);
+  const saveTimer = useRef(null);
+
+  // ---- load ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const v = localStorage.getItem(STORE_KEY);
+        if (v) setState({ ...blankState(), ...JSON.parse(v) });
+      } catch (e) { /* fresh */ }
+      setLoaded(true);
+    })();
+  }, []);
+
+  // ---- save (debounced) ----
+  useEffect(() => {
+    if (!loaded) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {}
+    }, 300);
+  }, [state, loaded]);
+
+  const n = state.shuffle.length;
+  const drawnTask = drawn ? state.tasks.find(t => t.id === drawn) : null;
+
+  // ---- actions ----
+  const addTask = () => {
+    const text = draftText.trim();
+    if (!text) return;
+    setState(s => {
+      const task = { id: uid(), text, section: draftSection };
+      const tasks = [...s.tasks, task];
+      const shuffle = shuffleArray([...s.shuffle, task.id]);
+      return { ...s, tasks, shuffle };
+    });
+    setDraftText("");
+  };
+
+  const reshuffle = () => {
+    setDrawn(null);
+    setPick("");
+    setState(s => ({ ...s, shuffle: shuffleArray(s.shuffle) }));
+  };
+
+  const draw = () => {
+    const num = parseInt(pick, 10);
+    if (!num || num < 1 || num > n) return;
+    setDrawn(state.shuffle[num - 1]);
+  };
+
+  const completeDrawn = () => {
+    if (!drawnTask) return;
+    const sec = drawnTask.section;
+    // sections that need user input show a reward form first
+    if (sec === "reading" || sec === "business") { setReward({ section: sec }); return; }
+    applyCompletion(drawnTask, {});
+  };
+
+  const applyCompletion = (task, extra) => {
+    setState(s => {
+      const tasks = s.tasks.filter(t => t.id !== task.id);
+      const shuffle = shuffleArray(s.shuffle.filter(id => id !== task.id));
+      const ns = { ...s, tasks, shuffle, history: [task.text, ...s.history].slice(0, 30) };
+      switch (task.section) {
+        case "reading": ns.books = [...s.books, { title: extra.title || task.text }]; break;
+        case "business": ns.coins = s.coins + (extra.amount || 10); break;
+        case "relationships": ns.plants = s.plants + 1; break;
+        case "fitness": ns.xp = s.xp + 100; break;
+        case "environment": ns.lights = s.lights + 1; break;
+      }
+      return ns;
+    });
+    setDrawn(null);
+    setPick("");
+    setReward(null);
+    setRewardInput("");
+    setFlash({ section: task.section });
+    setTimeout(() => setFlash(null), 1800);
+  };
+
+  const confirmReward = () => {
+    if (!reward) return;
+    const task = drawnTask;
+    if (reward.section === "reading") {
+      applyCompletion(task, { title: rewardInput.trim() || task.text });
+    } else if (reward.section === "business") {
+      const amt = Math.max(1, parseInt(rewardInput, 10) || 10);
+      applyCompletion(task, { amount: amt });
+    }
+  };
+
+  const medals = Math.floor(state.xp / 1000);
+
+  if (!loaded) {
+    return <div style={S.shellLoading}>Waking the room…</div>;
+  }
+
+  return (
+    <div style={S.shell}>
+      <style>{CSS}</style>
+      <header style={S.header}>
+        <div style={S.title}>The Quiet Cottage</div>
+        <div style={S.sub}>{inside ? "by the hearth — open the door to wander out" : "a little home that blooms with what you finish"}</div>
+      </header>
+
+      {/* ROOM SCENE */}
+      <div style={S.stage}>
+        {inside
+          ? <InteriorScene state={state} medals={medals} flash={flash} onExit={() => setInside(false)} />
+          : <RoomScene state={state} medals={medals} flash={flash} onEnter={() => setInside(true)} />}
+      </div>
+
+      {/* STAT STRIP */}
+      <div style={S.stats}>
+        <Stat c="#c9a06b" label="Books" v={state.books.length} />
+        <Stat c="#7bc47b" label="Coins" v={state.coins} />
+        <Stat c="#e08aa8" label="Plants" v={state.plants} />
+        <Stat c="#e0b84a" label="XP" v={`${state.xp}`} sub={`${medals} 🏅`} />
+        <Stat c="#79c6e0" label="Lights" v={state.lights} />
+      </div>
+
+      {/* TABS */}
+      <nav style={S.tabs}>
+        {[["room","The Room"],["add","Add Quest"],["gatcha",`Gatcha (${n})`]].map(([k,l]) => (
+          <button key={k} onClick={() => setTab(k)}
+            style={{ ...S.tab, ...(tab===k ? S.tabActive : {}) }}>{l}</button>
+        ))}
+      </nav>
+
+      <main style={S.panel}>
+        {tab === "room" && <RoomTab state={state} medals={medals} />}
+
+        {tab === "add" && (
+          <div>
+            <p style={S.lead}>Drop a quest into the machine. Pick its section — that decides what it grows.</p>
+            <div style={S.secGrid}>
+              {SECTION_KEYS.map(k => (
+                <button key={k} onClick={() => setDraftSection(k)}
+                  style={{ ...S.secChip,
+                    borderColor: SECTIONS[k].color,
+                    background: draftSection===k ? SECTIONS[k].color : "transparent",
+                    color: draftSection===k ? "#1a1322" : SECTIONS[k].color }}>
+                  {SECTIONS[k].label}
+                </button>
+              ))}
+            </div>
+            <p style={S.rewardHint}>Completing → {SECTIONS[draftSection].reward}.</p>
+            <textarea value={draftText} onChange={e => setDraftText(e.target.value)}
+              placeholder="e.g. Read 20 pages of the new novel"
+              style={S.textarea}
+              onKeyDown={e => { if (e.key==="Enter" && (e.metaKey||e.ctrlKey)) addTask(); }} />
+            <button onClick={addTask} disabled={!draftText.trim()} style={S.primaryBtn}>
+              Add to the machine
+            </button>
+
+            {state.tasks.length > 0 && (
+              <div style={S.pending}>
+                <div style={S.pendingHead}>{state.tasks.length} quest{state.tasks.length>1?"s":""} waiting — numbers are hidden</div>
+                {SECTION_KEYS.map(k => {
+                  const c = state.tasks.filter(t=>t.section===k).length;
+                  if (!c) return null;
+                  return <span key={k} style={{...S.pendCount, color:SECTIONS[k].color, borderColor:SECTIONS[k].color}}>{SECTIONS[k].label}: {c}</span>;
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "gatcha" && (
+          <GatchaTab
+            n={n} pick={pick} setPick={setPick} draw={draw}
+            reshuffle={reshuffle} drawnTask={drawnTask}
+            completeDrawn={completeDrawn}
+            reward={reward} rewardInput={rewardInput} setRewardInput={setRewardInput}
+            confirmReward={confirmReward} cancelReward={() => { setReward(null); setRewardInput(""); }}
+          />
+        )}
+      </main>
+
+      <footer style={S.footer}>Everything saves automatically. The numbers reshuffle every draw and every finish.</footer>
+    </div>
+  );
+}
+
+/* ---------------- Gatcha ---------------- */
+function GatchaTab({ n, pick, setPick, draw, reshuffle, drawnTask, completeDrawn, reward, rewardInput, setRewardInput, confirmReward, cancelReward }) {
+  if (n === 0) {
+    return <div style={S.empty}>The machine is empty. Add some quests first — they’ll get secret numbers inside.</div>;
+  }
+
+  if (reward) {
+    const sec = reward.section;
+    return (
+      <div style={S.rewardCard}>
+        <div style={S.rewardTitle}>Quest cleared!</div>
+        {sec === "reading" && (
+          <>
+            <p style={S.lead}>Add a book to your shelf. What did you read?</p>
+            <input value={rewardInput} onChange={e=>setRewardInput(e.target.value)}
+              placeholder="Book title" style={S.input} autoFocus
+              onKeyDown={e=>{ if(e.key==="Enter") confirmReward(); }} />
+          </>
+        )}
+        {sec === "business" && (
+          <>
+            <p style={S.lead}>Drop money in the piggy bank. How much did you earn or save?</p>
+            <input type="number" min={1} value={rewardInput} onChange={e=>setRewardInput(e.target.value)}
+              placeholder="Amount of coins" style={S.input} autoFocus
+              onKeyDown={e=>{ if(e.key==="Enter") confirmReward(); }} />
+          </>
+        )}
+        <div style={S.row}>
+          <button onClick={confirmReward} style={S.primaryBtn}>Place it</button>
+          <button onClick={cancelReward} style={S.ghostBtn}>Back</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (drawnTask) {
+    const sec = SECTIONS[drawnTask.section];
+    return (
+      <div style={S.drawCard}>
+        <div style={{...S.drawTag, color:sec.color, borderColor:sec.color}}>{sec.label}</div>
+        <div style={S.drawText}>{drawnTask.text}</div>
+        <p style={S.rewardHint}>Finish this and you earn {sec.reward}.</p>
+        <div style={S.row}>
+          <button onClick={completeDrawn} style={S.primaryBtn}>I did it ✓</button>
+          <button onClick={reshuffle} style={S.ghostBtn}>↻ Reshuffle & redraw</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={S.capsuleRow}>
+        <div style={S.capsuleBig}>n = {n}</div>
+        <div style={S.capsuleNote}>{n} quest{n>1?"s":""} hidden inside, each holding a secret number 1–{n}.</div>
+      </div>
+      <p style={S.lead}>Pick a number. You won’t know what you get.</p>
+      <div style={S.row}>
+        <input type="number" min={1} max={n} value={pick}
+          onChange={e=>setPick(e.target.value)} placeholder={`1–${n}`}
+          style={S.numInput}
+          onKeyDown={e=>{ if(e.key==="Enter") draw(); }} />
+        <button onClick={draw} disabled={!pick || pick<1 || pick>n} style={S.primaryBtn}>Draw</button>
+      </div>
+      <button onClick={reshuffle} style={{...S.ghostBtn, marginTop:14}}>↻ Reshuffle the capsules</button>
+    </div>
+  );
+}
+
+/* ---------------- Room detail tab ---------------- */
+function RoomTab({ state, medals }) {
+  return (
+    <div>
+      <p style={S.lead}>Your room so far. Each finished quest leaves a permanent mark.</p>
+      <div style={S.detailGrid}>
+        <DetailCard title="Bookshelf" color="#c9a06b">
+          {state.books.length === 0 ? <em style={S.dim}>No books yet — finish a Reading quest.</em> :
+            state.books.map((b,i)=><div key={i} style={S.listItem}>📖 {b.title}</div>)}
+        </DetailCard>
+        <DetailCard title="Piggy Bank" color="#7bc47b">
+          <div style={S.bigNum}>{state.coins} <span style={S.dim}>coins</span></div>
+          <em style={S.dim}>Finish Business quests to add more.</em>
+        </DetailCard>
+        <DetailCard title="Garden" color="#e08aa8">
+          <div style={S.bigNum}>{state.plants} <span style={S.dim}>growing</span></div>
+          <div style={S.plantRow}>{Array.from({length:Math.min(state.plants,14)}).map((_,i)=><span key={i}>{["🌷","🌻","🌸","🥕","🌼","🌽","🍅","🌹"][i%8]}</span>)}</div>
+        </DetailCard>
+        <DetailCard title="Trophy Shelf" color="#e0b84a">
+          <div style={S.bigNum}>{medals} <span style={S.dim}>medal{medals!==1?"s":""}</span></div>
+          <em style={S.dim}>{state.xp} XP · {1000 - (state.xp%1000)} to next medal</em>
+        </DetailCard>
+        <DetailCard title="Fairy Lights" color="#79c6e0">
+          <div style={S.bigNum}>{state.lights} <span style={S.dim}>strands</span></div>
+          <em style={S.dim}>Finish Environment quests to brighten the walls.</em>
+        </DetailCard>
+        <DetailCard title="Recent" color="#b89a7a">
+          {state.history.length===0 ? <em style={S.dim}>Nothing finished yet.</em> :
+            state.history.slice(0,6).map((h,i)=><div key={i} style={S.listItem}>✓ {h}</div>)}
+        </DetailCard>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   STUDIO-GHIBLI / COTTAGECORE SCENE
+   Soft painterly SVG: gradients, organic curves, dappled light,
+   thatched cottage, climbing roses, a lush flower garden that
+   blooms with Relationship quests, drifting spores & warm air.
+   ============================================================ */
+
+// soft flower used in the garden — petals as overlapping ellipses
+function GhibliFlower({ x, y, scale = 1, kind = 0, i = 0 }) {
+  const K = [
+    { petal: "#f4889e", center: "#ffd45e", stem: "#5e8a4a", leaf: "#7cae58" }, // rose-pink
+    { petal: "#f7b733", center: "#a8632a", stem: "#5e8a4a", leaf: "#7cae58" }, // sunflower
+    { petal: "#b48ce0", center: "#fce38a", stem: "#5e8a4a", leaf: "#7cae58" }, // lavender-purple
+    { petal: "#ffffff", center: "#ffd45e", stem: "#5e8a4a", leaf: "#7cae58" }, // daisy-white
+    { petal: "#7fb8e6", center: "#fce38a", stem: "#5e8a4a", leaf: "#7cae58" }, // cornflower-blue
+    { petal: "#f76d5e", center: "#5e8a4a", stem: "#5e8a4a", leaf: "#7cae58" }, // tulip-red
+    { petal: "#ff9ec2", center: "#ffd45e", stem: "#5e8a4a", leaf: "#7cae58" }, // pink bloom
+    { petal: "#f4c95d", center: "#c98a2a", stem: "#5e8a4a", leaf: "#7cae58" }, // marigold
+  ];
+  const c = K[kind % K.length];
+  const dur = 4 + (i % 4);
+  return (
+    <g transform={`translate(${x},${y}) scale(${scale})`}>
+      <animateTransform attributeName="transform" type="rotate" additive="sum"
+        values={`-2 0 6; 2 0 6; -2 0 6`} dur={`${dur}s`} repeatCount="indefinite" />
+      {/* stem */}
+      <path d="M0,6 Q-0.6,2 0,-1" stroke={c.stem} strokeWidth="0.9" fill="none" strokeLinecap="round" />
+      {/* leaves */}
+      <ellipse cx="-1.6" cy="3" rx="1.5" ry="0.7" fill={c.leaf} transform="rotate(-25 -1.6 3)" />
+      <ellipse cx="1.6" cy="4.2" rx="1.5" ry="0.7" fill={c.leaf} transform="rotate(25 1.6 4.2)" />
+      {/* petals */}
+      {[0, 60, 120, 180, 240, 300].map((a) => (
+        <ellipse key={a} cx="0" cy="-2.4" rx="1.1" ry="1.9" fill={c.petal}
+          transform={`rotate(${a} 0 -1)`} opacity="0.96" />
+      ))}
+      {/* center */}
+      <circle cx="0" cy="-1" r="1.1" fill={c.center} />
+    </g>
+  );
+}
+
+// soft round bush / shrub
+function Bush({ x, y, s = 1, tone = "#6fa052" }) {
+  return (
+    <g transform={`translate(${x},${y}) scale(${s})`}>
+      <ellipse cx="0" cy="0" rx="9" ry="6" fill={tone} />
+      <ellipse cx="-5" cy="1" rx="5" ry="4" fill={tone} />
+      <ellipse cx="5" cy="1" rx="5" ry="4" fill={tone} />
+      <ellipse cx="-3" cy="-3" rx="4" ry="3.4" fill="#7fb45e" opacity="0.7" />
+      <ellipse cx="3" cy="-2.5" rx="3.4" ry="2.8" fill="#7fb45e" opacity="0.6" />
+    </g>
+  );
+}
+
+function RoomScene({ state, medals, flash, onEnter }) {
+  const litWall = Math.min(state.lights, 6);
+  const books = Math.min(state.books.length, 10);
+  const gardenPlants = state.plants;
+  const coins = state.coins;
+  const trophies = Math.min(medals, 6);
+
+  // garden flower positions around the cottage (organic scatter)
+  const PLOTS = [
+    [26,124],[42,127],[58,128],[150,128],[166,127],[182,124],
+    [16,112],[14,98],[178,112],[180,98],
+    [74,130],[120,130],
+    [34,150],[160,150],
+    [50,146],[144,146],
+    [92,150],[104,150],
+  ];
+
+  return (
+    <svg viewBox="0 0 200 160" style={{ width:"100%", height:"auto", display:"block" }}>
+      <defs>
+        <linearGradient id="g-sky" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#bfe6f0" />
+          <stop offset="55%" stopColor="#dff1e6" />
+          <stop offset="100%" stopColor="#f4f3d8" />
+        </linearGradient>
+        <radialGradient id="g-sun" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="#fff9e0" />
+          <stop offset="60%" stopColor="#fdeeb8" stopOpacity="0.7" />
+          <stop offset="100%" stopColor="#fdeeb8" stopOpacity="0" />
+        </radialGradient>
+        <linearGradient id="g-hillA" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#aacf7e" />
+          <stop offset="100%" stopColor="#8fbf68" />
+        </linearGradient>
+        <linearGradient id="g-hillB" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#8cc06a" />
+          <stop offset="100%" stopColor="#73ad54" />
+        </linearGradient>
+        <linearGradient id="g-grass" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#86bf5e" />
+          <stop offset="100%" stopColor="#5f9a45" />
+        </linearGradient>
+        <linearGradient id="g-thatch" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#e7b96a" />
+          <stop offset="100%" stopColor="#c9904a" />
+        </linearGradient>
+        <linearGradient id="g-wall" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#fff6e6" />
+          <stop offset="100%" stopColor="#f0e2c6" />
+        </linearGradient>
+        <radialGradient id="g-glow" cx="50%" cy="40%" r="60%">
+          <stop offset="0%" stopColor={`rgba(255,228,150,${0.25 + litWall*0.09})`} />
+          <stop offset="100%" stopColor="rgba(255,228,150,0)" />
+        </radialGradient>
+        <filter id="soft"><feGaussianBlur stdDeviation="0.5" /></filter>
+      </defs>
+
+      {/* ---------- SKY ---------- */}
+      <rect x="0" y="0" width="200" height="116" fill="url(#g-sky)" />
+      <circle cx="166" cy="30" r="40" fill="url(#g-sun)" />
+      <circle cx="166" cy="30" r="11" fill="#fffbe8" />
+      {/* soft clouds */}
+      <g fill="#ffffff" opacity="0.9">
+        <ellipse cx="38" cy="24" rx="16" ry="6" />
+        <ellipse cx="50" cy="21" rx="11" ry="6" />
+        <ellipse cx="28" cy="22" rx="9" ry="5" />
+        <ellipse cx="120" cy="16" rx="14" ry="5" />
+        <ellipse cx="131" cy="14" rx="9" ry="5" />
+      </g>
+
+      {/* ---------- ROLLING HILLS ---------- */}
+      <path d="M0,96 Q50,72 100,90 T200,84 L200,160 L0,160 Z" fill="url(#g-hillA)" />
+      <path d="M0,112 Q60,92 120,108 T200,104 L200,160 L0,160 Z" fill="url(#g-hillB)" />
+      {/* distant trees on the hills */}
+      {[[24,90],[40,86],[176,92],[190,88]].map(([tx,ty],i)=>(
+        <g key={i}>
+          <ellipse cx={tx} cy={ty-4} rx="6" ry="7" fill="#6fa052" />
+          <ellipse cx={tx} cy={ty-8} rx="4.5" ry="5" fill="#7fb45e" />
+          <rect x={tx-1} y={ty} width="2" height="5" fill="#7a5a3a" />
+        </g>
+      ))}
+
+      {/* ---------- FOREGROUND MEADOW ---------- */}
+      <path d="M0,114 Q100,104 200,112 L200,160 L0,160 Z" fill="url(#g-grass)" />
+      {/* dappled light pooling at the cottage */}
+      <ellipse cx="100" cy="120" rx="110" ry="40" fill="url(#g-glow)" />
+      {/* soft stone path to the door */}
+      <g>
+        <path d="M88,150 Q92,132 96,120 L104,120 Q108,132 112,150 Z" fill="#d8cdb4" />
+        {[124,131,138,145].map((py,i)=>(
+          <ellipse key={i} cx={100} cy={py} rx={6-i*0.4} ry="1.8" fill="#c4b89c" />
+        ))}
+      </g>
+
+      {/* ============ THE COTTAGE ============ */}
+      {/* back garden bushes peeking behind */}
+      <Bush x={58} y={104} s={1.1} tone="#6aa050" />
+      <Bush x={142} y={104} s={1.1} tone="#6aa050" />
+
+      {/* thatched roof */}
+      <path d="M40,78 Q100,30 160,78 Q160,82 156,84 L44,84 Q40,82 40,78 Z" fill="url(#g-thatch)" />
+      {/* thatch strokes */}
+      <g stroke="#b07d3f" strokeWidth="0.8" opacity="0.5" fill="none">
+        <path d="M58,76 Q100,44 142,76" />
+        <path d="M52,80 Q100,50 148,80" />
+        <path d="M48,83 Q100,56 152,83" />
+      </g>
+      <path d="M96,33 Q100,31 104,33 L104,40 L96,40 Z" fill="#c9904a" />
+      {/* little chimney with curl of smoke */}
+      <rect x="128" y="48" width="9" height="16" rx="1.5" fill="#c98f6a" />
+      <rect x="127" y="47" width="11" height="3" rx="1.5" fill="#b07a55" />
+      <g fill="#ffffff" opacity="0.55">
+        <circle cx="133" cy="42" r="2.2"><animate attributeName="cy" values="42;30" dur="4s" repeatCount="indefinite" /><animate attributeName="opacity" values="0.55;0" dur="4s" repeatCount="indefinite" /></circle>
+        <circle cx="135" cy="38" r="2.6"><animate attributeName="cy" values="38;24" dur="4s" begin="1s" repeatCount="indefinite" /><animate attributeName="opacity" values="0.5;0" dur="4s" begin="1s" repeatCount="indefinite" /></circle>
+      </g>
+
+      {/* cottage body */}
+      <path d="M48,84 L152,84 Q154,84 154,87 L154,140 Q154,142 152,142 L48,142 Q46,142 46,140 L46,87 Q46,84 48,84 Z" fill="url(#g-wall)" />
+      {/* timber framing (Tudor cottagecore) */}
+      <g stroke="#b89160" strokeWidth="1.4" opacity="0.65">
+        <line x1="46" y1="112" x2="154" y2="112" />
+        <line x1="70" y1="84" x2="70" y2="142" />
+        <line x1="130" y1="84" x2="130" y2="142" />
+        <line x1="46" y1="112" x2="70" y2="84" opacity="0.4" />
+        <line x1="154" y1="112" x2="130" y2="84" opacity="0.4" />
+      </g>
+      {/* wall warm shading */}
+      <path d="M46,87 L154,87 L154,95 L46,95 Z" fill="#ffffff" opacity="0.3" />
+
+      {/* climbing roses up the left wall (grow a touch with garden) */}
+      <g>
+        <path d="M52,142 Q48,120 54,100 Q50,90 56,84" stroke="#5e8a4a" strokeWidth="1.3" fill="none" />
+        {[138,128,118,108,98,90].map((ry,i)=>(
+          <g key={i}>
+            <circle cx={51 + (i%2?4:-2)} cy={ry} r="2.1" fill={i%2?"#f4889e":"#ff9ec2"} />
+            <circle cx={51 + (i%2?4:-2)} cy={ry} r="0.9" fill="#ffd45e" />
+          </g>
+        ))}
+      </g>
+
+      {/* ----- LEFT WINDOW: bookshelf + trophies + fairy lights glow inside ----- */}
+      <g>
+        <rect x="58" y="98" width="26" height="22" rx="2" fill="#8a6038" />
+        <rect x="60" y="100" width="22" height="18" rx="1.5" fill="#3f5560" />
+        <rect x="60" y="100" width="22" height="18" rx="1.5" fill="#ffe49a" opacity={0.12 + litWall*0.07} />
+        {/* bookshelf inside */}
+        <rect x="62" y="110" width="18" height="8" fill="#5a3f28" />
+        <line x1="62" y1="114" x2="80" y2="114" stroke="#3f2817" strokeWidth="0.6" />
+        {[...Array(books)].map((_,i)=>{
+          const row=i<5?0:1, idx=i%5;
+          const cols=["#e0b84a","#d98c6a","#9ec47b","#7baee0","#c79bff","#ef8a6a","#e08aa8","#6fc04a","#4a8fe0","#ffd45e"];
+          return <rect key={i} x={62.5+idx*3.4} y={row?114:110} width="3" height="4" rx="0.4" fill={cols[i%cols.length]} />;
+        })}
+        {/* trophies on top */}
+        {[...Array(trophies)].map((_,i)=>(
+          <circle key={i} cx={63.5+i*3} cy="107" r="1.3" fill="#ffd45e" stroke="#c98a2a" strokeWidth="0.3" />
+        ))}
+        {/* window cross + sill + flower box */}
+        <line x1="71" y1="100" x2="71" y2="118" stroke="#8a6038" strokeWidth="1.2" />
+        <line x1="60" y1="109" x2="82" y2="109" stroke="#8a6038" strokeWidth="1.2" />
+        <rect x="56" y="119" width="30" height="4" rx="1.5" fill="#9a6a40" />
+        {/* fairy lights strung above window */}
+        <path d="M56,99 Q71,95 86,99" stroke="#7a5a3a" strokeWidth="0.5" fill="none" />
+        {[...Array(6)].map((_,i)=>{
+          const on=i<litWall;
+          const lc=["#ff6a8a","#ffd45e","#6fe0a0","#4ac0e0","#c79bff","#ff9ec2"][i];
+          return <circle key={i} cx={58+i*5} cy={98} r="1.1" fill={on?lc:"#b9a98c"}>
+            {on && <animate attributeName="opacity" values="1;0.5;1" dur={`${1.6+i*0.3}s`} repeatCount="indefinite" />}
+          </circle>;
+        })}
+        {[58,64,70,76,82].map((bx,i)=>(
+          <GhibliFlower key={i} x={bx} y={120} scale={0.7} kind={i} i={i} />
+        ))}
+      </g>
+
+      {/* ----- RIGHT WINDOW: gatcha + piggy inside ----- */}
+      <g>
+        <rect x="116" y="98" width="26" height="22" rx="2" fill="#8a6038" />
+        <rect x="118" y="100" width="22" height="18" rx="1.5" fill="#3f5560" />
+        <rect x="118" y="100" width="22" height="18" rx="1.5" fill="#ffe49a" opacity={0.12 + litWall*0.07} />
+        {/* gatcha machine */}
+        <circle cx="126" cy="107" r="5" fill="#ff8fae" />
+        <circle cx="126" cy="107" r="5" fill="#ffffff" opacity="0.2" />
+        <circle cx="124.5" cy="105.5" r="1.6" fill="#ffffff" opacity="0.6" />
+        <circle cx="124" cy="108" r="1" fill="#ffd45e" />
+        <circle cx="128" cy="107" r="1" fill="#6fe0a0" />
+        <circle cx="126" cy="109" r="1" fill="#7fb8e6" />
+        <rect x="122" y="111" width="8" height="7" rx="1" fill="#d2547a" />
+        <rect x="124.5" y="113" width="3" height="2" rx="0.5" fill="#7a2942" />
+        {/* piggy bank */}
+        <g transform="translate(132,110)">
+          <ellipse cx="3" cy="4" rx="5" ry="3.6" fill="#f4a0c0" />
+          <circle cx="0.5" cy="3.4" r="0.5" fill="#7a2942" />
+          <path d="M7.5,2.5 l2,-1 l-0.4,2.4 z" fill="#f4a0c0" />
+          <rect x="1.5" y="0.6" width="3" height="1" rx="0.5" fill="#d2547a" />
+        </g>
+        <line x1="129" y1="100" x2="129" y2="118" stroke="#8a6038" strokeWidth="1.2" />
+        <line x1="118" y1="109" x2="140" y2="109" stroke="#8a6038" strokeWidth="1.2" />
+        <rect x="114" y="119" width="30" height="4" rx="1.5" fill="#9a6a40" />
+        {/* n= readout */}
+        <rect x="118" y="119.5" width="22" height="3.4" rx="1" fill="#3a2418" opacity="0.55" />
+        <text x="129" y="122.2" fontSize="2.6" fill="#ffd45e" textAnchor="middle" fontFamily="Georgia, serif">n = {state.shuffle.length}</text>
+        {coins>0 && <circle cx="120" cy="103" r="1" fill="#ffd45e"><animate attributeName="opacity" values="1;0.2;1" dur="1.5s" repeatCount="indefinite" /></circle>}
+        {[116,122,128,134,140].map((bx,i)=>(
+          <GhibliFlower key={i} x={bx} y={120} scale={0.7} kind={(i+3)} i={i} />
+        ))}
+      </g>
+
+      {/* ----- arched DOOR (clickable) ----- */}
+      <g onClick={onEnter} style={{ cursor:"pointer" }}>
+        <path d="M92,142 L92,124 Q100,116 108,124 L108,142 Z" fill="#8a5a32" />
+        <path d="M93.5,142 L93.5,125 Q100,118 106.5,125 L106.5,142 Z" fill="#a06f40" />
+        <line x1="100" y1="119" x2="100" y2="142" stroke="#7a4e2c" strokeWidth="0.6" opacity="0.6" />
+        <circle cx="104" cy="133" r="1.1" fill="#ffd45e" />
+        {/* little arched window in door */}
+        <path d="M97,124 Q100,121 103,124 L103,127 L97,127 Z" fill="#cfe8e0" opacity="0.8" />
+        {/* hover hint */}
+        <path className="qr-door-hint" d="M90,143 L90,123 Q100,114 110,123 L110,143" fill="none" stroke="#ffd45e" strokeWidth="1" opacity="0" />
+        <rect className="qr-door-label-bg" x="90" y="106" width="20" height="6" rx="3" fill="#3a2418" opacity="0" />
+        <text className="qr-door-label" x="100" y="110.3" fontSize="3.4" fill="#fff3d0" textAnchor="middle" fontFamily="Georgia, serif" opacity="0">enter</text>
+      </g>
+
+      {/* potted plants flanking the door */}
+      <g>
+        <path d="M82,142 l1.5,6 l5,0 l1.5,-6 z" fill="#c47a4a" />
+        <Bush x={86} y={140} s={0.5} tone="#6fa052" />
+        <path d="M111,142 l1.5,6 l5,0 l1.5,-6 z" fill="#c47a4a" />
+        <Bush x={115} y={140} s={0.5} tone="#6fa052" />
+      </g>
+
+      {/* ============ THE GARDEN (Relationships) ============ */}
+      {PLOTS.map((p,i)=>{
+        if (i >= gardenPlants) {
+          // a small sprout / tuft waiting
+          return (
+            <g key={`e${i}`} opacity="0.8">
+              <path d={`M${p[0]},${p[1]} q-1,-3 0,-5`} stroke="#6fa052" strokeWidth="0.8" fill="none" />
+              <path d={`M${p[0]},${p[1]-2} q1.5,-1 2.5,-2.5`} stroke="#7cae58" strokeWidth="0.7" fill="none" />
+            </g>
+          );
+        }
+        return <GhibliFlower key={`f${i}`} x={p[0]} y={p[1]} scale={1.25} kind={i} i={i} />;
+      })}
+
+      {/* drifting dust-motes / spores for that Ghibli air (when garden alive) */}
+      {gardenPlants >= 2 && [...Array(5)].map((_,i)=>(
+        <circle key={i} cx={30+i*36} cy={70} r="1" fill="#fff8dc" opacity="0.7">
+          <animate attributeName="cy" values={`${70+i*4};${50+i*4};${70+i*4}`} dur={`${6+i}s`} repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.7;0.2;0.7" dur={`${6+i}s`} repeatCount="indefinite" />
+        </circle>
+      ))}
+
+      {/* a gentle butterfly once the garden blooms */}
+      {gardenPlants >= 3 && (
+        <g>
+          <g>
+            <path d="M0,0 q-3,-3 -1,-5 q2,0 1,5" fill="#f7b733" opacity="0.9" />
+            <path d="M0,0 q3,-3 1,-5 q-2,0 -1,5" fill="#f4c95d" opacity="0.9" />
+            <ellipse cx="0" cy="-1" rx="0.5" ry="2" fill="#5a3a2a" />
+          </g>
+          <animateMotion dur="11s" repeatCount="indefinite" rotate="auto" path="M24,118 q40,-26 80,-6 t80,-10 t-160,12 z" />
+        </g>
+      )}
+
+      {/* celebration flash */}
+      {flash && (
+        <text x="100" y="60" fontSize="9" textAnchor="middle" fontFamily="Georgia, serif" fontStyle="italic"
+          fill={SECTIONS[flash.section].color} style={{ paintOrder:"stroke", stroke:"#fffdf6", strokeWidth:1.4 }}>
+          + {SECTIONS[flash.section].label}!
+          <animate attributeName="y" values="60;44" dur="1.8s" />
+          <animate attributeName="opacity" values="1;1;0" dur="1.8s" />
+        </text>
+      )}
+    </svg>
+  );
+}
+
+/* ============================================================
+   INTERIOR — a warm, sunlit cottage room (Ghibli style).
+   Trophy shelf with medals, bookshelf, hearth, gatcha, piggy.
+   ============================================================ */
+function GhibliMedal({ x, y, s = 1 }) {
+  return (
+    <g transform={`translate(${x},${y}) scale(${s})`}>
+      {/* ribbon */}
+      <path d="M-2,-6 L-0.6,-1 L0,-2 L0.6,-1 L2,-6 Z" fill="#5b8ec9" />
+      <path d="M-2,-6 L-1.4,-6 L-0.2,-1.6 Z" fill="#4a78ad" />
+      {/* gold disc */}
+      <circle cx="0" cy="1.6" r="2.8" fill="#f4c95d" stroke="#c98a2a" strokeWidth="0.5" />
+      <circle cx="0" cy="1.6" r="2.8" fill="#fff0b0" opacity="0.35" />
+      <circle cx="-0.8" cy="0.8" r="0.7" fill="#fffbe8" opacity="0.8" />
+      {/* star */}
+      <path d="M0,0.2 l0.5,1 l1.1,0.1 l-0.8,0.7 l0.3,1 l-1.1,-0.6 l-1.1,0.6 l0.3,-1 l-0.8,-0.7 l1.1,-0.1 z" fill="#c98a2a" />
+    </g>
+  );
+}
+
+function InteriorScene({ state, medals, flash, onExit }) {
+  const litWall = Math.min(state.lights, 6);
+  const books = Math.min(state.books.length, 12);
+  const trophies = Math.min(medals, 5);
+
+  return (
+    <svg viewBox="0 0 200 160" style={{ width:"100%", height:"auto", display:"block" }}>
+      <defs>
+        <linearGradient id="i-wall" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#f3e2c2" />
+          <stop offset="100%" stopColor="#e6cca0" />
+        </linearGradient>
+        <linearGradient id="i-floor" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#c69a63" />
+          <stop offset="100%" stopColor="#a8794a" />
+        </linearGradient>
+        <radialGradient id="i-glow" cx="50%" cy="35%" r="60%">
+          <stop offset="0%" stopColor={`rgba(255,224,140,${0.2 + litWall*0.08})`} />
+          <stop offset="100%" stopColor="rgba(255,224,140,0)" />
+        </radialGradient>
+        <radialGradient id="i-fire" cx="50%" cy="60%" r="60%">
+          <stop offset="0%" stopColor="#ffd76a" />
+          <stop offset="60%" stopColor="#f7913a" />
+          <stop offset="100%" stopColor="#d2542a" />
+        </radialGradient>
+      </defs>
+
+      {/* wall */}
+      <rect x="0" y="0" width="200" height="116" fill="#efdcb8" />
+      <rect x="0" y="0" width="200" height="116" fill="url(#i-wall)" opacity="0.5" />
+      {/* wainscot trim */}
+      <rect x="0" y="104" width="200" height="12" fill="#d8b888" />
+      <rect x="0" y="104" width="200" height="2" fill="#c49a66" />
+      {/* floor with soft boards */}
+      <rect x="0" y="116" width="200" height="44" fill="url(#i-floor)" />
+      {[28,60,92,124,156,188].map((x,i)=>(
+        <line key={i} x1={x} y1="116" x2={x+(i-2.5)*6} y2="160" stroke="#8f6438" strokeWidth="0.8" opacity="0.5" />
+      ))}
+      <ellipse cx="100" cy="70" rx="120" ry="74" fill="url(#i-glow)" />
+
+      {/* big sunny window with garden view (center-back) */}
+      <g>
+        <rect x="78" y="20" width="44" height="40" rx="3" fill="#9a6a40" />
+        <rect x="81" y="23" width="38" height="34" rx="2" fill="#bfe6f0" />
+        <path d="M81,46 Q100,38 119,46 L119,57 L81,57 Z" fill="#8fbf68" />
+        <circle cx="108" cy="30" r="5" fill="#fff7d8" />
+        {/* a couple of garden blooms seen through glass */}
+        {state.plants>0 && <GhibliFlower x={90} y={52} scale={0.8} kind={0} />}
+        {state.plants>1 && <GhibliFlower x={110} y={52} scale={0.8} kind={2} />}
+        <line x1="100" y1="23" x2="100" y2="57" stroke="#9a6a40" strokeWidth="1.5" />
+        <line x1="81" y1="40" x2="119" y2="40" stroke="#9a6a40" strokeWidth="1.5" />
+        <rect x="75" y="57" width="50" height="4" rx="2" fill="#a8794a" />
+        {/* window-box flowers */}
+        {[80,90,100,110,118].map((bx,i)=>(
+          <GhibliFlower key={i} x={bx} y={59} scale={0.6} kind={i+1} i={i} />
+        ))}
+      </g>
+
+      {/* hanging fairy lights across the ceiling */}
+      <path d="M6,8 Q60,16 100,8 T194,10" stroke="#7a5a3a" strokeWidth="0.6" fill="none" />
+      {[...Array(6)].map((_,i)=>{
+        const on=i<litWall, xs=[18,46,74,116,150,180], ys=[11,14,10,10,13,11];
+        const lc=["#ff6a8a","#ffd45e","#6fe0a0","#4ac0e0","#c79bff","#ff9ec2"][i];
+        return <g key={i}>
+          <circle cx={xs[i]} cy={ys[i]} r="1.6" fill={on?lc:"#cbb894"}>
+            {on && <animate attributeName="opacity" values="1;0.5;1" dur={`${1.6+i*0.3}s`} repeatCount="indefinite" />}
+          </circle>
+          {on && <circle cx={xs[i]} cy={ys[i]} r="3.4" fill={lc} opacity="0.2" />}
+        </g>;
+      })}
+
+      {/* ============ TROPHY SHELF (left wall) ============ */}
+      <g>
+        <rect x="12" y="58" width="50" height="5" rx="1.5" fill="#9a6a40" />
+        <rect x="12" y="58" width="50" height="1.5" fill="#b88a58" />
+        <path d="M18,63 l3,6 M56,63 l-3,6" stroke="#7a4e2c" strokeWidth="1.4" />
+        {/* engraved sign above */}
+        <rect x="20" y="46" width="34" height="7" rx="2" fill="#b88a58" />
+        <rect x="21" y="47" width="32" height="5" rx="1.5" fill="#a0703f" />
+        <text x="37" y="50.6" fontSize="3.4" fill="#fff3d0" textAnchor="middle" fontFamily="Georgia, serif" fontStyle="italic">Trophies</text>
+        {/* medals */}
+        {trophies>0
+          ? [...Array(trophies)].map((_,i)=> <GhibliMedal key={i} x={20+i*9} y={54} s={1.15} />)
+          : <text x="37" y="57" fontSize="3.2" fill="#a8895f" textAnchor="middle" fontFamily="Georgia, serif" fontStyle="italic">earn 1000 XP…</text>}
+        {medals>5 && <text x="58" y="56" fontSize="3.2" fill="#c98a2a" fontFamily="Georgia, serif">+{medals-5}</text>}
+      </g>
+
+      {/* ============ BOOKSHELF (right wall) ============ */}
+      <g>
+        <rect x="138" y="40" width="52" height="44" rx="2" fill="#7a4e2c" />
+        <rect x="140" y="42" width="48" height="40" rx="1.5" fill="#5a3a22" />
+        {[55,69].map(yy=> <rect key={yy} x={140} y={yy} width="48" height="2.5" fill="#7a4e2c" />)}
+        {[...Array(books)].map((_,i)=>{
+          const row=Math.floor(i/4), idx=i%4;
+          const cols=["#e0b84a","#d98c6a","#9ec47b","#7baee0","#c79bff","#ef8a6a","#e08aa8","#6fc04a","#4a8fe0","#ffd45e","#ff9ec2","#5fb04a"];
+          const lean = (i===books-1 && books%4!==0) ? 4 : 0;
+          return <g key={i} transform={`rotate(${lean} ${143+idx*11} ${row?68:54})`}>
+            <rect x={143+idx*11} y={row?59:45} width="8" height="10" rx="0.6" fill={cols[i%cols.length]} />
+            <rect x={143+idx*11} y={row?59:45} width="8" height="1.4" fill="#ffffff" opacity="0.3" />
+          </g>;
+        })}
+        {books===0 && <text x="164" y="64" fontSize="3.2" fill="#a8895f" textAnchor="middle" fontFamily="Georgia, serif" fontStyle="italic">a quiet shelf</text>}
+        {/* a little potted vine on top */}
+        <path d="M180,40 q4,-6 0,-12 q-3,4 0,12" fill="#6fa052" />
+        <rect x="177" y="36" width="6" height="4" rx="1" fill="#c47a4a" />
+      </g>
+
+      {/* ============ STONE HEARTH with fire (warmth = fairy lights) ============ */}
+      <g>
+        <rect x="86" y="84" width="28" height="32" rx="2" fill="#b9a890" />
+        <rect x="88" y="86" width="24" height="3" fill="#a3927a" />
+        {/* stone texture */}
+        <g fill="#a3927a" opacity="0.6">
+          <circle cx="92" cy="94" r="1.6" /><circle cx="100" cy="93" r="2" /><circle cx="108" cy="95" r="1.6" />
+        </g>
+        {/* fire opening */}
+        <path d="M93,116 L93,102 Q100,96 107,102 L107,116 Z" fill="#2a1810" />
+        {/* logs + flame */}
+        <rect x="95" y="112" width="10" height="2.4" rx="1" fill="#7a4e2c" />
+        <path d="M100,113 Q96,107 99,103 Q100,107 102,104 Q104,108 100,113 Z" fill="url(#i-fire)">
+          <animate attributeName="opacity" values="1;0.75;1" dur="1.2s" repeatCount="indefinite" />
+        </path>
+        <circle cx="100" cy="106" r="1.4" fill="#ffe9a0" opacity="0.9">
+          <animate attributeName="r" values="1.4;1.9;1.4" dur="1.4s" repeatCount="indefinite" />
+        </circle>
+        {/* mantel */}
+        <rect x="83" y="82" width="34" height="3" rx="1.5" fill="#9a6a40" />
+        {/* warm floor glow from hearth */}
+        <ellipse cx="100" cy="120" rx="26" ry="7" fill="#ffb74a" opacity="0.25" />
+      </g>
+
+      {/* ============ GATCHA MACHINE (floor, beside hearth) ============ */}
+      <g transform="translate(120,92)">
+        <ellipse cx="9" cy="30" rx="11" ry="3" fill="#000" opacity="0.12" />
+        <rect x="2" y="20" width="14" height="10" rx="2" fill="#d2547a" />
+        <rect x="3" y="12" width="12" height="10" rx="2" fill="#e2618a" />
+        <circle cx="9" cy="8" r="8" fill="#ff8fae" />
+        <circle cx="9" cy="8" r="8" fill="#ffffff" opacity="0.18" />
+        <path d="M3,4 Q9,1 15,4" stroke="#ffffff" strokeWidth="1.2" fill="none" opacity="0.5" />
+        <circle cx="6" cy="8" r="1.6" fill="#ffd45e" />
+        <circle cx="11" cy="6" r="1.6" fill="#6fe0a0" />
+        <circle cx="10" cy="10" r="1.6" fill="#7fb8e6" />
+        <circle cx="7" cy="11" r="1.4" fill="#c79bff" />
+        <rect x="6" y="22" width="6" height="3" rx="1" fill="#7a2942" />
+        <circle cx="9" cy="27" r="1.2" fill="#ffd0dc" />
+        <rect x="0" y="31" width="18" height="4" rx="2" fill="#3a2418" opacity="0.6" />
+        <text x="9" y="34" fontSize="2.8" fill="#ffd45e" textAnchor="middle" fontFamily="Georgia, serif">n = {state.shuffle.length}</text>
+      </g>
+
+      {/* ============ PIGGY BANK (floor, left of hearth) ============ */}
+      <g transform="translate(54,98)">
+        <ellipse cx="11" cy="20" rx="13" ry="3" fill="#000" opacity="0.12" />
+        <ellipse cx="11" cy="12" rx="13" ry="9" fill="#f4a0c0" />
+        <ellipse cx="11" cy="12" rx="13" ry="9" fill="#ffffff" opacity="0.12" />
+        <path d="M21,8 l4,-2 l-0.6,4.6 z" fill="#f4a0c0" />
+        <circle cx="6" cy="10" r="1" fill="#7a2942" />
+        <ellipse cx="6" cy="14" rx="2" ry="1.4" fill="#e2789e" />
+        <rect x="8" y="3" width="6" height="1.6" rx="0.8" fill="#d2547a" />
+        {/* legs */}
+        <rect x="4" y="19" width="2.4" height="3" rx="1" fill="#e2789e" />
+        <rect x="16" y="19" width="2.4" height="3" rx="1" fill="#e2789e" />
+        {state.coins>0 && (
+          <>
+            <circle cx="2" cy="4" r="1.2" fill="#ffd45e"><animate attributeName="opacity" values="1;0.2;1" dur="1.5s" repeatCount="indefinite" /></circle>
+            <text x="11" y="29" fontSize="3" fill="#a0703f" textAnchor="middle" fontFamily="Georgia, serif" fontStyle="italic">{state.coins} saved</text>
+          </>
+        )}
+      </g>
+
+      {/* a cozy braided rug */}
+      <g>
+        <ellipse cx="100" cy="140" rx="46" ry="13" fill="#c06a7a" opacity="0.85" />
+        <ellipse cx="100" cy="140" rx="36" ry="10" fill="#dd8a90" opacity="0.8" />
+        <ellipse cx="100" cy="140" rx="24" ry="6.5" fill="#f0b39a" opacity="0.8" />
+        <ellipse cx="100" cy="140" rx="12" ry="3.4" fill="#f7d6a8" opacity="0.8" />
+      </g>
+
+      {/* potted plant brought in from the garden */}
+      {state.plants>0 && (
+        <g transform="translate(168,96)">
+          <path d="M0,14 l1.5,8 l9,0 l1.5,-8 z" fill="#c47a4a" />
+          <path d="M0,14 l13,0 l-0.6,2 l-11.8,0 z" fill="#d2894f" />
+          <GhibliFlower x={4} y={14} scale={1} kind={0} />
+          <GhibliFlower x={9} y={15} scale={0.9} kind={6} />
+        </g>
+      )}
+
+      {/* drifting dust motes in the sunbeam */}
+      {[...Array(4)].map((_,i)=>(
+        <circle key={i} cx={88+i*8} cy={66} r="0.8" fill="#fff8dc" opacity="0.7">
+          <animate attributeName="cy" values={`${66+i*3};${48+i*3};${66+i*3}`} dur={`${5+i}s`} repeatCount="indefinite" />
+          <animate attributeName="opacity" values="0.7;0.2;0.7" dur={`${5+i}s`} repeatCount="indefinite" />
+        </circle>
+      ))}
+
+      {/* ============ EXIT DOOR (clickable, arched, left) ============ */}
+      <g onClick={onExit} style={{ cursor:"pointer" }}>
+        <path d="M8,116 L8,74 Q22,62 36,74 L36,116 Z" fill="#8a5a32" />
+        <path d="M10,116 L10,75 Q22,64 34,75 L34,116 Z" fill="#a06f40" />
+        <line x1="22" y1="64" x2="22" y2="116" stroke="#7a4e2c" strokeWidth="0.7" opacity="0.6" />
+        <path d="M15,76 Q22,70 29,76 L29,82 L15,82 Z" fill="#cfe8e0" opacity="0.85" />
+        <circle cx="31" cy="96" r="1.3" fill="#ffd45e" />
+        <path className="qr-door-hint" d="M6,117 L6,73 Q22,60 38,73 L38,117" fill="none" stroke="#ffd45e" strokeWidth="1" opacity="0" />
+        <rect className="qr-door-label-bg" x="11" y="54" width="22" height="6" rx="3" fill="#3a2418" opacity="0" />
+        <text className="qr-door-label" x="22" y="58.3" fontSize="3.4" fill="#fff3d0" textAnchor="middle" fontFamily="Georgia, serif" opacity="0">outside</text>
+      </g>
+
+      {/* celebration flash */}
+      {flash && (
+        <text x="100" y="40" fontSize="9" textAnchor="middle" fontFamily="Georgia, serif" fontStyle="italic"
+          fill={SECTIONS[flash.section].color} style={{ paintOrder:"stroke", stroke:"#fffdf6", strokeWidth:1.4 }}>
+          + {SECTIONS[flash.section].label}!
+          <animate attributeName="y" values="40;26" dur="1.8s" />
+          <animate attributeName="opacity" values="1;1;0" dur="1.8s" />
+        </text>
+      )}
+    </svg>
+  );
+}
+
+function Stat({ c, label, v, sub }) {
+  return (
+    <div style={S.stat}>
+      <div style={{ ...S.statDot, background:c }} />
+      <div>
+        <div style={S.statV}>{v}{sub && <span style={S.statSub}> {sub}</span>}</div>
+        <div style={S.statL}>{label}</div>
+      </div>
+    </div>
+  );
+}
+function DetailCard({ title, color, children }) {
+  return (
+    <div style={{ ...S.detail, borderColor:color }}>
+      <div style={{ ...S.detailTitle, color }}>{title}</div>
+      <div>{children}</div>
+    </div>
+  );
+}
+
+/* ---------------- styles (Studio Ghibli cottagecore) ---------------- */
+const FONT = "'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif";
+const FONT_UI = "'Iowan Old Style', Georgia, serif";
+const INK = "#5a4636";       // warm soft brown
+const INK_DIM = "#9a866f";   // muted
+const CORAL = "#c97b6a";     // dusty rose
+const SAGE = "#7a9a6b";      // garden sage
+const S = {
+  shellLoading: { minHeight:300, display:"grid", placeItems:"center", color:INK_DIM, fontFamily:FONT, background:"#fbf4e4", fontStyle:"italic" },
+  shell: { fontFamily:FONT, background:"#fbf4e4", color:INK, maxWidth:560, margin:"0 auto", borderRadius:18, overflow:"hidden", border:"1px solid #e6d6bc", boxShadow:"0 1px 0 #fff inset" },
+  header: { padding:"18px 18px 8px", textAlign:"center" },
+  title: { fontSize:25, letterSpacing:3, fontWeight:600, color:"#8a6a4a", fontStyle:"italic" },
+  sub: { fontSize:12, color:INK_DIM, marginTop:3, fontStyle:"italic" },
+  stage: { padding:"4px 12px 0", background:"radial-gradient(120% 90% at 50% 14%, #fcf8ec, #f3ead4)" },
+  stats: { display:"flex", gap:7, padding:"12px", flexWrap:"wrap", justifyContent:"center", background:"#f3ead4" },
+  stat: { display:"flex", alignItems:"center", gap:7, background:"#fcf8ec", padding:"6px 11px", borderRadius:14, minWidth:80, border:"1px solid #ecdcc0" },
+  statDot: { width:8, height:8, borderRadius:8 },
+  statV: { fontSize:15, fontWeight:600 },
+  statSub: { fontSize:10, color:INK_DIM },
+  statL: { fontSize:9.5, color:INK_DIM, letterSpacing:0.5, fontStyle:"italic" },
+  tabs: { display:"flex", gap:5, padding:"6px 12px 0", background:"#f3ead4" },
+  tab: { flex:1, padding:"11px 6px", background:"#ece0c8", color:INK_DIM, border:"none", borderRadius:"12px 12px 0 0", fontFamily:FONT_UI, fontSize:13, cursor:"pointer", fontStyle:"italic" },
+  tabActive: { background:"#fdf8ee", color:"#8a6a4a", fontWeight:600 },
+  panel: { padding:"18px 16px 22px", background:"#fdf8ee", minHeight:180 },
+  lead: { fontSize:14, color:INK, margin:"0 0 12px", lineHeight:1.55 },
+  secGrid: { display:"flex", flexWrap:"wrap", gap:7, marginBottom:10 },
+  secChip: { padding:"7px 13px", borderRadius:20, border:"1.5px solid", background:"transparent", fontFamily:FONT_UI, fontSize:12.5, cursor:"pointer", fontWeight:500 },
+  rewardHint: { fontSize:12, color:INK_DIM, margin:"0 0 12px", fontStyle:"italic" },
+  textarea: { width:"100%", boxSizing:"border-box", minHeight:64, background:"#fffdf8", color:INK, border:"1px solid #e3d2b4", borderRadius:12, padding:11, fontFamily:FONT, fontSize:14, resize:"vertical" },
+  primaryBtn: { marginTop:12, padding:"11px 20px", background:CORAL, color:"#fff", border:"none", borderRadius:22, fontFamily:FONT_UI, fontWeight:600, fontSize:14, cursor:"pointer", letterSpacing:0.5 },
+  ghostBtn: { marginTop:12, padding:"11px 18px", background:"transparent", color:INK, border:"1px solid #d6c2a0", borderRadius:22, fontFamily:FONT_UI, fontSize:13, cursor:"pointer", fontStyle:"italic" },
+  pending: { marginTop:18, paddingTop:14, borderTop:"1px dashed #ddc9a8" },
+  pendingHead: { fontSize:12.5, color:INK_DIM, marginBottom:8, fontStyle:"italic" },
+  pendCount: { display:"inline-block", margin:"0 6px 6px 0", padding:"3px 9px", border:"1px solid", borderRadius:12, fontSize:11 },
+  empty: { textAlign:"center", color:INK_DIM, padding:"30px 10px", fontSize:13.5, lineHeight:1.6, fontStyle:"italic" },
+  capsuleRow: { display:"flex", alignItems:"center", gap:14, background:"#fbf1dc", borderRadius:14, padding:15, marginBottom:14, border:"1px solid #ecdcc0" },
+  capsuleBig: { fontSize:27, fontWeight:600, color:"#8a6a4a", whiteSpace:"nowrap", fontStyle:"italic" },
+  capsuleNote: { fontSize:12.5, color:INK_DIM, lineHeight:1.5 },
+  row: { display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" },
+  numInput: { width:110, padding:"11px 12px", background:"#fffdf8", color:CORAL, border:"1px solid #e3d2b4", borderRadius:12, fontFamily:FONT, fontSize:19, fontWeight:600, textAlign:"center" },
+  input: { width:"100%", boxSizing:"border-box", padding:"11px 12px", background:"#fffdf8", color:INK, border:"1px solid #e3d2b4", borderRadius:12, fontFamily:FONT, fontSize:14, marginBottom:4 },
+  drawCard: { background:"#fbf1dc", borderRadius:16, padding:18, border:"1px solid #e6d6bc" },
+  drawTag: { display:"inline-block", padding:"3px 12px", border:"1px solid", borderRadius:12, fontSize:11.5, marginBottom:10, fontStyle:"italic" },
+  drawText: { fontSize:19, lineHeight:1.4, marginBottom:6, color:INK },
+  rewardCard: { background:"#fbf1dc", borderRadius:16, padding:18, border:"1px solid #d8b878" },
+  rewardTitle: { fontSize:17, color:"#8a6a4a", fontWeight:600, marginBottom:10, fontStyle:"italic" },
+  detailGrid: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 },
+  detail: { background:"#fbf1dc", borderRadius:14, padding:13, border:"1px solid", borderLeftWidth:4 },
+  detailTitle: { fontSize:13, fontWeight:600, marginBottom:8, fontStyle:"italic" },
+  listItem: { fontSize:12.5, color:INK, padding:"2px 0", lineHeight:1.4 },
+  bigNum: { fontSize:23, fontWeight:600, color:INK, marginBottom:4 },
+  dim: { color:INK_DIM, fontSize:11, fontWeight:400, fontStyle:"italic" },
+  plantRow: { fontSize:16, marginTop:4 },
+  footer: { padding:"10px 16px 16px", fontSize:10.5, color:INK_DIM, textAlign:"center", background:"#fdf8ee", lineHeight:1.5, fontStyle:"italic" },
+};
+const CSS = `
+  * { -webkit-tap-highlight-color: transparent; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible { outline:2px solid #c97b6a; outline-offset:1px; }
+  @media (max-width:420px){ .qr-stat{min-width:64px;} }
+  @media (prefers-reduced-motion: reduce){ animate{ display:none; } }
+  g:hover > .qr-door-hint { opacity:0.9 !important; }
+  g:hover > .qr-door-label { opacity:1 !important; }
+  g:hover > .qr-door-label-bg { opacity:0.55 !important; }
+`;
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(QuestRoom));
+
+  </script>
+</body>
+</html>
