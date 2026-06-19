@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#fdf6ec" />
+  <title>Quest Room (Pixel)</title>
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%23bfe3ff'/%3E%3Crect y='10' width='16' height='6' fill='%235fb04a'/%3E%3Crect x='5' y='4' width='6' height='5' fill='%23a33f55'/%3E%3Crect x='6' y='6' width='4' height='3' fill='%23f0d9b0'/%3E%3C/svg%3E" />
+  <style>
+    html, body { margin: 0; padding: 0; background: #fdf6ec; -webkit-text-size-adjust: 100%; }
+    #root { padding: 12px 8px 32px; min-height: 100vh; box-sizing: border-box; }
+    .boot { font-family: Georgia, serif; color: #9a866f; text-align: center; padding: 60px 20px; }
+  </style>
+</head>
+<body>
+  <div id="root"><div class="boot">Loading the room…</div></div>
+
+  <!-- error overlay so failures are visible instead of an endless loading screen -->
+  <script>
+    window.__err = function (msg) {
+      var r = document.getElementById('root');
+      if (r) r.innerHTML = '<div style="font-family:Georgia,serif;color:#8a4a3a;padding:40px 22px;line-height:1.6;max-width:520px;margin:0 auto">'
+        + '<div style="font-size:18px;font-style:italic;margin-bottom:10px">The cottage could not open</div>'
+        + '<div style="font-size:13px;color:#9a866f">' + msg + '</div>'
+        + '<div style="font-size:12px;color:#b0a088;margin-top:16px">Tip: open this in a normal browser (Safari / Chrome) with an internet connection, not inside an email or app preview.</div></div>';
+    };
+    window.addEventListener('error', function (e) {
+      if (window.__booted) return;
+      window.__err((e && e.message) ? e.message : 'A script error occurred.');
+    });
+  </script>
+
+  <!-- React + Babel from CDN, with a jsDelivr fallback if unpkg is blocked -->
+  <script>
+    function loadScript(urls, cb) {
+      var i = 0;
+      (function next() {
+        if (i >= urls.length) { window.__err('Could not download a required library (' + urls[0] + '). Check your connection or content blocker.'); return; }
+        var s = document.createElement('script');
+        s.src = urls[i]; s.crossOrigin = 'anonymous';
+        s.onload = cb;
+        s.onerror = function () { i++; next(); };
+        document.head.appendChild(s);
+      })();
+    }
+    loadScript(
+      ['https://unpkg.com/react@18/umd/react.production.min.js',
+       'https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js'],
+      function () {
+        loadScript(
+          ['https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
+           'https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js'],
+          function () {
+            loadScript(
+              ['https://unpkg.com/@babel/standalone/babel.min.js',
+               'https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js'],
+              function () {
+                if (!window.React || !window.ReactDOM || !window.Babel) {
+                  window.__err('Libraries loaded but did not initialize. Try refreshing.');
+                  return;
+                }
+                // run the app code (stored in the template script tag below)
+                try {
+                  var code = document.getElementById('app-code').textContent;
+                  var out = Babel.transform(code, { presets: [['react', { runtime: 'classic' }]], sourceType: 'script' }).code;
+                  (0, eval)(out);
+                  window.__booted = true;
+                } catch (err) {
+                  window.__err((err && err.message) ? err.message : String(err));
+                }
+              });
+          });
+      });
+  </script>
+
+  <script type="text/plain" id="app-code">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ============================================================
+   QUEST ROOM — a pixel-art bedroom that evolves as you work.
+   Gatcha mechanic: tasks get secret hidden numbers 1..n.
+   You pick a number, get a surprise task, complete or reshuffle.
+   ============================================================ */
+
+const SECTIONS = {
+  reading:      { label: "Reading",      color: "#c9a06b", glyph: "book",   reward: "a book on the shelf" },
+  business:     { label: "Business",     color: "#7bc47b", glyph: "coin",   reward: "money of your choice in the piggy bank" },
+  relationships:{ label: "Relationships",color: "#e08aa8", glyph: "plant",  reward: "a flower or vegetable in the garden" },
+  fitness:      { label: "Fitness",      color: "#e0b84a", glyph: "medal",  reward: "100 XP toward a trophy" },
+  environment:  { label: "Environment",  color: "#79c6e0", glyph: "light",  reward: "fairy lights on the wall" },
+};
+const SECTION_KEYS = Object.keys(SECTIONS);
+
+const STORE_KEY = "questroom-pixel:v1";
+
+const blankState = () => ({
+  tasks: [],            // {id, text, section}
+  shuffle: [],          // array of task ids, index = (number-1)
+  books: [],            // {title}
+  coins: 0,
+  plants: 0,
+  xp: 0,
+  lights: 0,
+  history: [],          // completed task texts (recent first)
+});
+
+let _id = 0;
+const uid = () => `t${Date.now()}_${_id++}`;
+
+function shuffleArray(a) {
+  const arr = [...a];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function QuestRoom() {
+  const [state, setState] = useState(blankState());
+  const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState("room"); // room | add | gatcha
+  const [draftText, setDraftText] = useState("");
+  const [draftSection, setDraftSection] = useState("reading");
+  const [pick, setPick] = useState("");
+  const [drawn, setDrawn] = useState(null); // currently drawn task id
+  const [flash, setFlash] = useState(null); // {section} celebration
+  const [reward, setReward] = useState(null); // pending reward form
+  const [rewardInput, setRewardInput] = useState("");
+  const [inside, setInside] = useState(false);
+  const saveTimer = useRef(null);
+
+  // ---- load ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const v = localStorage.getItem(STORE_KEY);
+        if (v) setState({ ...blankState(), ...JSON.parse(v) });
+      } catch (e) { /* fresh */ }
+      setLoaded(true);
+    })();
+  }, []);
+
+  // ---- save (debounced) ----
+  useEffect(() => {
+    if (!loaded) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {}
+    }, 300);
+  }, [state, loaded]);
+
+  const n = state.shuffle.length;
+  const drawnTask = drawn ? state.tasks.find(t => t.id === drawn) : null;
+
+  // ---- actions ----
+  const addTask = () => {
+    const text = draftText.trim();
+    if (!text) return;
+    setState(s => {
+      const task = { id: uid(), text, section: draftSection };
+      const tasks = [...s.tasks, task];
+      const shuffle = shuffleArray([...s.shuffle, task.id]);
+      return { ...s, tasks, shuffle };
+    });
+    setDraftText("");
+  };
+
+  const reshuffle = () => {
+    setDrawn(null);
+    setPick("");
+    setState(s => ({ ...s, shuffle: shuffleArray(s.shuffle) }));
+  };
+
+  const draw = () => {
+    const num = parseInt(pick, 10);
+    if (!num || num < 1 || num > n) return;
+    setDrawn(state.shuffle[num - 1]);
+  };
+
+  const completeDrawn = () => {
+    if (!drawnTask) return;
+    const sec = drawnTask.section;
+    // sections that need user input show a reward form first
+    if (sec === "reading" || sec === "business") { setReward({ section: sec }); return; }
+    applyCompletion(drawnTask, {});
+  };
+
+  const applyCompletion = (task, extra) => {
+    setState(s => {
+      const tasks = s.tasks.filter(t => t.id !== task.id);
+      const shuffle = shuffleArray(s.shuffle.filter(id => id !== task.id));
+      const ns = { ...s, tasks, shuffle, history: [task.text, ...s.history].slice(0, 30) };
+      switch (task.section) {
+        case "reading": ns.books = [...s.books, { title: extra.title || task.text }]; break;
+        case "business": ns.coins = s.coins + (extra.amount || 10); break;
+        case "relationships": ns.plants = s.plants + 1; break;
+        case "fitness": ns.xp = s.xp + 100; break;
+        case "environment": ns.lights = s.lights + 1; break;
+      }
+      return ns;
+    });
+    setDrawn(null);
+    setPick("");
+    setReward(null);
+    setRewardInput("");
+    setFlash({ section: task.section });
+    setTimeout(() => setFlash(null), 1800);
+  };
+
+  const confirmReward = () => {
+    if (!reward) return;
+    const task = drawnTask;
+    if (reward.section === "reading") {
+      applyCompletion(task, { title: rewardInput.trim() || task.text });
+    } else if (reward.section === "business") {
+      const amt = Math.max(1, parseInt(rewardInput, 10) || 10);
+      applyCompletion(task, { amount: amt });
+    }
+  };
+
+  const medals = Math.floor(state.xp / 1000);
+
+  if (!loaded) {
+    return <div style={S.shellLoading}>Waking the room…</div>;
+  }
+
+  return (
+    <div style={S.shell}>
+      <style>{CSS}</style>
+      <header style={S.header}>
+        <div style={S.title}>QUEST&nbsp;ROOM</div>
+        <div style={S.sub}>{inside ? "inside — click the door to step out" : "click the door to step inside"}</div>
+      </header>
+
+      {/* ROOM SCENE */}
+      <div style={S.stage}>
+        {inside
+          ? <InteriorScene state={state} medals={medals} flash={flash} onExit={() => setInside(false)} />
+          : <RoomScene state={state} medals={medals} flash={flash} onEnter={() => setInside(true)} />}
+      </div>
+
+      {/* STAT STRIP */}
+      <div style={S.stats}>
+        <Stat c="#c9a06b" label="Books" v={state.books.length} />
+        <Stat c="#7bc47b" label="Coins" v={state.coins} />
+        <Stat c="#e08aa8" label="Plants" v={state.plants} />
+        <Stat c="#e0b84a" label="XP" v={`${state.xp}`} sub={`${medals} 🏅`} />
+        <Stat c="#79c6e0" label="Lights" v={state.lights} />
+      </div>
+
+      {/* TABS */}
+      <nav style={S.tabs}>
+        {[["room","The Room"],["add","Add Quest"],["gatcha",`Gatcha (${n})`]].map(([k,l]) => (
+          <button key={k} onClick={() => setTab(k)}
+            style={{ ...S.tab, ...(tab===k ? S.tabActive : {}) }}>{l}</button>
+        ))}
+      </nav>
+
+      <main style={S.panel}>
+        {tab === "room" && <RoomTab state={state} medals={medals} />}
+
+        {tab === "add" && (
+          <div>
+            <p style={S.lead}>Drop a quest into the machine. Pick its section — that decides what it grows.</p>
+            <div style={S.secGrid}>
+              {SECTION_KEYS.map(k => (
+                <button key={k} onClick={() => setDraftSection(k)}
+                  style={{ ...S.secChip,
+                    borderColor: SECTIONS[k].color,
+                    background: draftSection===k ? SECTIONS[k].color : "transparent",
+                    color: draftSection===k ? "#1a1322" : SECTIONS[k].color }}>
+                  {SECTIONS[k].label}
+                </button>
+              ))}
+            </div>
+            <p style={S.rewardHint}>Completing → {SECTIONS[draftSection].reward}.</p>
+            <textarea value={draftText} onChange={e => setDraftText(e.target.value)}
+              placeholder="e.g. Read 20 pages of the new novel"
+              style={S.textarea}
+              onKeyDown={e => { if (e.key==="Enter" && (e.metaKey||e.ctrlKey)) addTask(); }} />
+            <button onClick={addTask} disabled={!draftText.trim()} style={S.primaryBtn}>
+              Add to the machine
+            </button>
+
+            {state.tasks.length > 0 && (
+              <div style={S.pending}>
+                <div style={S.pendingHead}>{state.tasks.length} quest{state.tasks.length>1?"s":""} waiting — numbers are hidden</div>
+                {SECTION_KEYS.map(k => {
+                  const c = state.tasks.filter(t=>t.section===k).length;
+                  if (!c) return null;
+                  return <span key={k} style={{...S.pendCount, color:SECTIONS[k].color, borderColor:SECTIONS[k].color}}>{SECTIONS[k].label}: {c}</span>;
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "gatcha" && (
+          <GatchaTab
+            n={n} pick={pick} setPick={setPick} draw={draw}
+            reshuffle={reshuffle} drawnTask={drawnTask}
+            completeDrawn={completeDrawn}
+            reward={reward} rewardInput={rewardInput} setRewardInput={setRewardInput}
+            confirmReward={confirmReward} cancelReward={() => { setReward(null); setRewardInput(""); }}
+          />
+        )}
+      </main>
+
+      <footer style={S.footer}>Everything saves automatically. The numbers reshuffle every draw and every finish.</footer>
+    </div>
+  );
+}
+
+/* ---------------- Gatcha ---------------- */
+function GatchaTab({ n, pick, setPick, draw, reshuffle, drawnTask, completeDrawn, reward, rewardInput, setRewardInput, confirmReward, cancelReward }) {
+  if (n === 0) {
+    return <div style={S.empty}>The machine is empty. Add some quests first — they’ll get secret numbers inside.</div>;
+  }
+
+  if (reward) {
+    const sec = reward.section;
+    return (
+      <div style={S.rewardCard}>
+        <div style={S.rewardTitle}>Quest cleared!</div>
+        {sec === "reading" && (
+          <>
+            <p style={S.lead}>Add a book to your shelf. What did you read?</p>
+            <input value={rewardInput} onChange={e=>setRewardInput(e.target.value)}
+              placeholder="Book title" style={S.input} autoFocus
+              onKeyDown={e=>{ if(e.key==="Enter") confirmReward(); }} />
+          </>
+        )}
+        {sec === "business" && (
+          <>
+            <p style={S.lead}>Drop money in the piggy bank. How much did you earn or save?</p>
+            <input type="number" min={1} value={rewardInput} onChange={e=>setRewardInput(e.target.value)}
+              placeholder="Amount of coins" style={S.input} autoFocus
+              onKeyDown={e=>{ if(e.key==="Enter") confirmReward(); }} />
+          </>
+        )}
+        <div style={S.row}>
+          <button onClick={confirmReward} style={S.primaryBtn}>Place it</button>
+          <button onClick={cancelReward} style={S.ghostBtn}>Back</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (drawnTask) {
+    const sec = SECTIONS[drawnTask.section];
+    return (
+      <div style={S.drawCard}>
+        <div style={{...S.drawTag, color:sec.color, borderColor:sec.color}}>{sec.label}</div>
+        <div style={S.drawText}>{drawnTask.text}</div>
+        <p style={S.rewardHint}>Finish this and you earn {sec.reward}.</p>
+        <div style={S.row}>
+          <button onClick={completeDrawn} style={S.primaryBtn}>I did it ✓</button>
+          <button onClick={reshuffle} style={S.ghostBtn}>↻ Reshuffle & redraw</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={S.capsuleRow}>
+        <div style={S.capsuleBig}>n = {n}</div>
+        <div style={S.capsuleNote}>{n} quest{n>1?"s":""} hidden inside, each holding a secret number 1–{n}.</div>
+      </div>
+      <p style={S.lead}>Pick a number. You won’t know what you get.</p>
+      <div style={S.row}>
+        <input type="number" min={1} max={n} value={pick}
+          onChange={e=>setPick(e.target.value)} placeholder={`1–${n}`}
+          style={S.numInput}
+          onKeyDown={e=>{ if(e.key==="Enter") draw(); }} />
+        <button onClick={draw} disabled={!pick || pick<1 || pick>n} style={S.primaryBtn}>Draw</button>
+      </div>
+      <button onClick={reshuffle} style={{...S.ghostBtn, marginTop:14}}>↻ Reshuffle the capsules</button>
+    </div>
+  );
+}
+
+/* ---------------- Room detail tab ---------------- */
+function RoomTab({ state, medals }) {
+  return (
+    <div>
+      <p style={S.lead}>Your room so far. Each finished quest leaves a permanent mark.</p>
+      <div style={S.detailGrid}>
+        <DetailCard title="Bookshelf" color="#c9a06b">
+          {state.books.length === 0 ? <em style={S.dim}>No books yet — finish a Reading quest.</em> :
+            state.books.map((b,i)=><div key={i} style={S.listItem}>📖 {b.title}</div>)}
+        </DetailCard>
+        <DetailCard title="Piggy Bank" color="#7bc47b">
+          <div style={S.bigNum}>{state.coins} <span style={S.dim}>coins</span></div>
+          <em style={S.dim}>Finish Business quests to add more.</em>
+        </DetailCard>
+        <DetailCard title="Garden" color="#e08aa8">
+          <div style={S.bigNum}>{state.plants} <span style={S.dim}>growing</span></div>
+          <div style={S.plantRow}>{Array.from({length:Math.min(state.plants,14)}).map((_,i)=><span key={i}>{["🌷","🌻","🌸","🥕","🌼","🌽","🍅","🌹"][i%8]}</span>)}</div>
+        </DetailCard>
+        <DetailCard title="Trophy Shelf" color="#e0b84a">
+          <div style={S.bigNum}>{medals} <span style={S.dim}>medal{medals!==1?"s":""}</span></div>
+          <em style={S.dim}>{state.xp} XP · {1000 - (state.xp%1000)} to next medal</em>
+        </DetailCard>
+        <DetailCard title="Fairy Lights" color="#79c6e0">
+          <div style={S.bigNum}>{state.lights} <span style={S.dim}>strands</span></div>
+          <em style={S.dim}>Finish Environment quests to brighten the walls.</em>
+        </DetailCard>
+        <DetailCard title="Recent" color="#b89a7a">
+          {state.history.length===0 ? <em style={S.dim}>Nothing finished yet.</em> :
+            state.history.slice(0,6).map((h,i)=><div key={i} style={S.listItem}>✓ {h}</div>)}
+        </DetailCard>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   RETRO PIXEL-ART SCENE — a cottage in a garden, Stardew/Terraria style.
+   Rendered on a 192x140 pixel grid, scaled up with crisp edges.
+   The garden around the house grows flowers & veg with Relationship quests.
+   ============================================================ */
+
+// pixel helpers — everything snaps to an integer grid for the chunky look
+const Px = ({ x, y, w = 1, h = 1, c, opacity, children }) => <rect x={x} y={y} width={w} height={h} fill={c} opacity={opacity}>{children}</rect>;
+// a column/cluster of pixels from a compact string map
+function PixelMap({ rows, x, y, palette, scale = 1 }) {
+  const out = [];
+  rows.forEach((row, ry) => {
+    let run = null;
+    for (let cx = 0; cx <= row.length; cx++) {
+      const ch = row[cx];
+      const col = ch && ch !== " " ? palette[ch] : null;
+      if (run && (col !== run.c || cx === row.length)) {
+        out.push(<rect key={`${ry}-${run.start}`} x={x + run.start * scale} y={y + ry * scale}
+          width={(cx - run.start) * scale} height={scale} fill={run.c} />);
+        run = null;
+      }
+      if (col && !run) run = { start: cx, c: col };
+    }
+  });
+  return <g>{out}</g>;
+}
+
+// flower / vegetable sprite designs for the garden (8px tall pixel sprites)
+const FLORA = [
+  { // red tulip
+    pal: { s: "#3f8f3a", l: "#6fc04a", f: "#e8483f", h: "#ff7a6a", c: "#ffd23f" },
+    rows: ["  f  ", " fhf ", " fcf ", " fff ", "  s  ", " lsl ", "  s  ", "  s  "],
+  },
+  { // sunflower
+    pal: { s: "#3f8f3a", l: "#6fc04a", f: "#ffc233", h: "#ffe066", c: "#7a4a1f" },
+    rows: ["fhfhf", "hfcfh", "fcccf", "fhfhf", "  s  ", " lsl ", "  s  ", "  s  "],
+  },
+  { // purple bloom
+    pal: { s: "#3f8f3a", l: "#6fc04a", f: "#9a5fd0", h: "#c79bff", c: "#ffe066" },
+    rows: ["  h  ", " hfh ", "hfcfh", " hfh ", "  s  ", " lsl ", "  s  ", "  s  "],
+  },
+  { // carrot (veg)
+    pal: { s: "#3f8f3a", l: "#6fc04a", f: "#ef7a33", h: "#ffa050", c: "#3f8f3a" },
+    rows: [" l l ", "llsll", " lsl ", "  f  ", " fhf ", " ff  ", "  f  ", "     "],
+  },
+  { // pink daisy
+    pal: { s: "#3f8f3a", l: "#6fc04a", f: "#ff9ec2", h: "#ffd0e0", c: "#ffd23f" },
+    rows: [" fhf ", "fhchf", " fcf ", " fhf ", "  s  ", " lsl ", "  s  ", "  s  "],
+  },
+  { // blue cornflower
+    pal: { s: "#3f8f3a", l: "#6fc04a", f: "#4a8fe0", h: "#7ab8ff", c: "#ffe066" },
+    rows: ["h f h", " hfh ", "fhchf", " hfh ", "  s  ", " lsl ", "  s  ", "  s  "],
+  },
+  { // tomato (veg)
+    pal: { s: "#3f8f3a", l: "#6fc04a", f: "#e23b32", h: "#ff6a5a", c: "#3f8f3a" },
+    rows: ["  l  ", " lcl ", " fhf ", "fhhhf", "ffhff", " fff ", "  s  ", "  s  "],
+  },
+  { // white tulip
+    pal: { s: "#3f8f3a", l: "#6fc04a", f: "#f5f0e6", h: "#ffffff", c: "#ffd23f" },
+    rows: ["  f  ", " fhf ", " fcf ", " fff ", "  s  ", " lsl ", "  s  ", "  s  "],
+  },
+];
+
+function RoomScene({ state, medals, flash, onEnter }) {
+  const litWall = Math.min(state.lights, 6);
+  const books = Math.min(state.books.length, 10);
+  const gardenPlants = state.plants;          // relationship -> outdoor garden
+  const coins = state.coins;
+  const trophies = Math.min(medals, 6);
+  const ambient = 0.18 + Math.min(state.lights, 6) * 0.1;
+
+  // garden plot positions ringing the house (foreground + sides)
+  const PLOTS = [
+    // front bed (along the bottom, left to right)
+    [14,116],[26,118],[38,119],[50,119],[140,119],[152,119],[164,118],[176,116],
+    [62,120],[128,120],
+    // side beds
+    [8,98],[8,86],[184,98],[184,86],
+    // a couple of back-garden sprouts near the fence (kept clear of house x48-144)
+    [22,70],[166,70],[34,66],[156,66],
+  ];
+
+  return (
+    <svg viewBox="0 0 192 140" style={{ width:"100%", height:"auto", display:"block", imageRendering:"pixelated" }}
+      shapeRendering="crispEdges">
+      <defs>
+        <radialGradient id="sun" cx="50%" cy="0%" r="90%">
+          <stop offset="0%" stopColor="#fff6d8" />
+          <stop offset="55%" stopColor="#bfe3ff" />
+          <stop offset="100%" stopColor="#9fd4f5" />
+        </radialGradient>
+        <radialGradient id="warm" cx="50%" cy="50%" r="60%">
+          <stop offset="0%" stopColor={`rgba(255,214,120,${ambient})`} />
+          <stop offset="100%" stopColor="rgba(255,214,120,0)" />
+        </radialGradient>
+      </defs>
+
+      {/* ---------- SKY ---------- */}
+      <rect x="0" y="0" width="192" height="84" fill="url(#sun)" />
+      {/* sun */}
+      <Px x={160} y={10} w={14} h={14} c="#fff2c0" />
+      <Px x={162} y={8} w={10} h={18} c="#fff2c0" />
+      <Px x={158} y={12} w={18} h={10} c="#fff2c0" />
+      <Px x={163} y={11} w={8} h={12} c="#fffbe6" />
+      {/* clouds (pixel blobs) */}
+      <PixelMap x={18} y={14} palette={{ w:"#ffffff", s:"#e8f3ff" }}
+        rows={[" www ", "wwwww", "swwws"]} scale={3} />
+      <PixelMap x={92} y={8} palette={{ w:"#ffffff", s:"#e8f3ff" }}
+        rows={["  ww  ", " wwww ", "swwwws"]} scale={3} />
+
+      {/* ---------- GRASS GROUND ---------- */}
+      <rect x="0" y="78" width="192" height="62" fill="#5fb04a" />
+      <rect x="0" y="78" width="192" height="6" fill="#73c557" />
+      {/* grass texture dithering */}
+      {Array.from({length:120}).map((_,i)=>{
+        const gx=(i*53)%190, gy=84+((i*37)%54);
+        return <Px key={i} x={gx} y={gy} w={1} h={1} c={i%3? "#52a040":"#6cbf52"} />;
+      })}
+      {/* dirt path to the door */}
+      <PixelMap x={88} y={108} palette={{ d:"#caa06a", e:"#b88a52" }}
+        rows={["edde","edde","edde","ddee","edde","edde","ddee","edde"]} scale={4} />
+
+      {/* warm light pooling from the house */}
+      <ellipse cx="96" cy="78" rx="90" ry="46" fill="url(#warm)" />
+
+      {/* ---------- BACK FENCE ---------- */}
+      {Array.from({length:13}).map((_,i)=>(
+        <g key={i}>
+          <Px x={6+i*14} y={60} w={4} h={20} c="#caa472" />
+          <Px x={6+i*14} y={60} w={4} h={2} c="#e0c08c" />
+        </g>
+      ))}
+      <Px x={4} y={66} w={184} h={3} c="#b89060" />
+      <Px x={4} y={73} w={184} h={3} c="#b89060" />
+
+      {/* ============ THE COTTAGE ============ */}
+      {/* roof */}
+      <PixelMap x={40} y={20} scale={4}
+        palette={{ a:"#c0506a", b:"#a33f55", c:"#8a3247", t:"#e87a8a" }}
+        rows={[
+          "      tt      ",
+          "     taat     ",
+          "    taaaat    ",
+          "   taaaaaat   ",
+          "  taaaaaaaat  ",
+          " taaaaaaaaaat ",
+          "tbbbbbbbbbbbbt",
+          "cbbbbbbbbbbbbc",
+        ]} />
+      {/* roof shadow line */}
+      <Px x={40} y={52} w={112} h={3} c="#7a2c3f" />
+
+      {/* house body */}
+      <Px x={48} y={55} w={96} h={56} c="#f0d9b0" />
+      {/* plank/log siding lines */}
+      {[60,72,84,96].map(yy=>(
+        <Px key={yy} x={48} y={yy} w={96} h={1} c="#dcc096" />
+      ))}
+      {/* corner posts */}
+      <Px x={48} y={55} w={4} h={56} c="#d8b888" />
+      <Px x={140} y={55} w={4} h={56} c="#d8b888" />
+
+      {/* ----- LEFT WINDOW (bookshelf + trophies + fairy lights inside) ----- */}
+      <g>
+        <Px x={56} y={62} w={34} h={30} c="#6b4a2e" />
+        <Px x={58} y={64} w={30} h={26} c="#2b3a4a" />{/* dim interior */}
+        {/* interior glow grows with fairy lights */}
+        <rect x="58" y="64" width="30" height="26" fill="#ffd67a" opacity={0.1 + litWall*0.06} />
+        {/* bookshelf */}
+        <Px x={60} y={78} w={26} h={12} c="#5a3a22" />
+        <Px x={60} y={84} w={26} h={1} c="#3f2817" />
+        {[...Array(books)].map((_,i)=>{
+          const row=i<5?0:1, idx=i%5;
+          const bx=61+idx*5, by=(row?85:79);
+          const cols=["#e0b84a","#d98c6a","#9ec47b","#7baee0","#c79bff","#ef8a6a","#e08aa8","#6fc04a","#4a8fe0","#ffd23f"];
+          return <Px key={i} x={bx} y={by} w={4} h={5} c={cols[i%cols.length]} />;
+        })}
+        {/* trophies on top shelf */}
+        {[...Array(trophies)].map((_,i)=>(
+          <g key={i}>
+            <Px x={61+i*4} y={73} w={2} h={3} c="#ffd23f" />
+            <Px x={61+i*4} y={76} w={2} h={1} c="#c0902a" />
+          </g>
+        ))}
+        {/* fairy lights strung across top of window */}
+        {[...Array(6)].map((_,i)=>{
+          const on=i<litWall;
+          const lc=["#ff6a8a","#ffd23f","#6fe0a0","#4ac0e0","#c79bff","#ff9ec2"][i];
+          return <g key={i}>
+            <Px x={59+i*5} y={65} w={2} h={2} c={on?lc:"#3a4a55"}>
+              {on && <animate attributeName="opacity" values="1;0.5;1" dur={`${1.6+i*0.3}s`} repeatCount="indefinite" />}
+            </Px>
+          </g>;
+        })}
+        {/* frame cross */}
+        <Px x={72} y={62} w={2} h={30} c="#6b4a2e" />
+        <Px x={56} y={76} w={34} h={2} c="#6b4a2e" />
+      </g>
+
+      {/* ----- RIGHT WINDOW (gatcha machine + piggy bank inside) ----- */}
+      <g>
+        <Px x={102} y={62} w={34} h={30} c="#6b4a2e" />
+        <Px x={104} y={64} w={30} h={26} c="#2b3a4a" />
+        <rect x="104" y="64" width="30" height="26" fill="#ffd67a" opacity={0.1 + litWall*0.06} />
+        {/* gatcha machine */}
+        <Px x={112} y={72} w={14} h={6} c="#d23b5b" />   {/* globe back */}
+        <Px x={113} y={70} w={12} h={8} c="#ff8aa8" />    {/* globe */}
+        <Px x={113} y={70} w={12} h={3} c="#ffd0dc" />    {/* glass shine */}
+        {/* capsules */}
+        <Px x={115} y={73} w={2} h={2} c="#ffd23f" />
+        <Px x={119} y={74} w={2} h={2} c="#6fe0a0" />
+        <Px x={122} y={72} w={2} h={2} c="#4ac0e0" />
+        <Px x={117} y={71} w={2} h={2} c="#c79bff" />
+        <Px x={112} y={78} w={14} h={8} c="#a3243f" /> {/* body */}
+        <Px x={117} y={80} w={4} h={3} c="#2b1018" /> {/* slot */}
+        <Px x={118} y={84} w={2} h={2} c="#ffd0dc" /> {/* knob */}
+        {/* piggy bank beside it */}
+        <PixelMap x={105} y={80} scale={2}
+          palette={{ p:"#ef8ab0", d:"#d2618e", e:"#2b1018" }}
+          rows={["  pp ", " pppp", "ppppp", "ppdpp", " p  p"]} />
+        {/* coin sparkle if saving */}
+        {coins>0 && <Px x={106} y={73} w={2} h={2} c="#ffd23f">
+          <animate attributeName="opacity" values="1;0.2;1" dur="1.4s" repeatCount="indefinite" />
+        </Px>}
+        {/* n= label glowing on the glass */}
+        <Px x={104} y={87} w={30} h={3} c="#1a1322" opacity="0.55" />
+        <text x="119" y="89.4" fontSize="3.2" fill="#ffd23f" textAnchor="middle" fontFamily="monospace">n={state.shuffle.length}</text>
+        <Px x={119} y={62} w={2} h={30} c="#6b4a2e" />
+        <Px x={102} y={76} w={34} h={2} c="#6b4a2e" />
+      </g>
+
+      {/* ----- DOOR (clickable: step inside) ----- */}
+      <g onClick={onEnter} style={{ cursor:"pointer" }}>
+        <Px x={90} y={86} w={14} h={25} c="#7a4a28" />
+        <Px x={91} y={87} w={12} h={23} c="#9a5f34" />
+        <Px x={92} y={88} w={10} h={9} c="#84502c" />
+        <Px x={92} y={99} w={10} h={9} c="#84502c" />
+        <Px x={100} y={98} w={2} h={2} c="#ffd23f" /> {/* knob */}
+        {/* hover-only glow ring + "enter" cue */}
+        <rect className="qr-door-hint" x="88" y="84" width="18" height="29" fill="none"
+          stroke="#ffd23f" strokeWidth="1" opacity="0" />
+        <rect x="89" y="78" width="16" height="6" rx="1" fill="#1a1322" opacity="0.0" className="qr-door-label-bg" />
+        <text x="97" y="82.4" fontSize="3.4" fill="#ffd23f" textAnchor="middle"
+          fontFamily="monospace" opacity="0" className="qr-door-label">ENTER</text>
+      </g>
+
+      {/* window flower boxes under each window */}
+      <Px x={56} y={92} w={34} h={4} c="#7a4a28" />
+      <Px x={102} y={92} w={34} h={4} c="#7a4a28" />
+      {[58,64,70,82,88].map((bx,i)=>(
+        <Px key={i} x={bx} y={89} w={3} h={3} c={["#e8483f","#ffc233","#9a5fd0","#ff9ec2","#4a8fe0"][i]} />
+      ))}
+      {[104,110,116,122,128].map((bx,i)=>(
+        <Px key={i} x={bx} y={89} w={3} h={3} c={["#ff9ec2","#6fc04a","#e8483f","#ffc233","#c79bff"][i]} />
+      ))}
+
+      {/* ============ THE GARDEN (Relationships) ============ */}
+      {/* tilled soil beds under the plots */}
+      {PLOTS.map((p,i)=>(
+        <Px key={`soil${i}`} x={p[0]-1} y={p[1]+6} w={10} h={3} c="#6b4524" />
+      ))}
+      {PLOTS.map((p,i)=>{
+        if (i >= gardenPlants) {
+          // empty tilled mound
+          return <PixelMap key={`e${i}`} x={p[0]} y={p[1]+4} scale={2}
+            palette={{ d:"#7a5028", m:"#8a5d31" }} rows={["dmd","ddd"]} />;
+        }
+        const f = FLORA[i % FLORA.length];
+        return (
+          <g key={`f${i}`}>
+            <PixelMap x={p[0]} y={p[1]-8} scale={2} palette={f.pal} rows={f.rows} />
+            {/* gentle sway */}
+            <animateTransform attributeName="transform" type="rotate"
+              values={`-1.5 ${p[0]+4} ${p[1]+8}; 1.5 ${p[0]+4} ${p[1]+8}; -1.5 ${p[0]+4} ${p[1]+8}`}
+              dur={`${3+i%3}s`} repeatCount="indefinite" />
+          </g>
+        );
+      })}
+
+      {/* a couple of decorative bushes flanking the door */}
+      <PixelMap x={78} y={100} scale={3} palette={{ g:"#3f8f3a", h:"#5fb04a" }}
+        rows={[" h ","hgh","ggg"]} />
+      <PixelMap x={108} y={100} scale={3} palette={{ g:"#3f8f3a", h:"#5fb04a" }}
+        rows={[" h ","hgh","ggg"]} />
+
+      {/* small butterfly that appears once the garden is blooming */}
+      {gardenPlants >= 3 && (
+        <g>
+          <PixelMap x={0} y={0} scale={2} palette={{ b:"#ffae00", k:"#3a2410" }}
+            rows={["b b","bkb","b b"]} />
+          <animateMotion dur="9s" repeatCount="indefinite" path="M20,96 q30,-20 60,0 t60,-4 t-120,8 z" />
+        </g>
+      )}
+
+      {/* ---------- celebration flash ---------- */}
+      {flash && (
+        <g>
+          <text x="96" y="50" fontSize="9" textAnchor="middle"
+            fill={SECTIONS[flash.section].color} fontFamily="monospace" fontWeight="bold"
+            style={{ paintOrder:"stroke", stroke:"#1a1322", strokeWidth:0.8 }}>
+            +{SECTIONS[flash.section].label}!
+            <animate attributeName="y" values="50;36" dur="1.6s" />
+            <animate attributeName="opacity" values="1;1;0" dur="1.6s" />
+          </text>
+        </g>
+      )}
+    </svg>
+  );
+}
+
+/* ============================================================
+   INTERIOR SCENE — step inside the cottage.
+   Trophy shelf with medals, bookshelf, fairy lights, gatcha, piggy.
+   ============================================================ */
+// medal sprite: blue ribbon + gold disc (7w x 10h)
+const MEDAL_SPRITE = {
+  pal: { r:"#3a6ea5", b:"#2a5080", g:"#ffd23f", h:"#fff0a0", d:"#c0902a" },
+  rows: [
+    "r   r",
+    "rb b r",
+    " rbbr ",
+    " bb b ",
+    " ghhg ",
+    "ghhhhg",
+    "ghdhdg",
+    "ghhhhg",
+    " gddg ",
+    "  gg  ",
+  ],
+};
+
+function InteriorScene({ state, medals, flash, onExit }) {
+  const litWall = Math.min(state.lights, 6);
+  const books = Math.min(state.books.length, 12);
+  const trophies = Math.min(medals, 6);
+  const ambient = 0.14 + litWall * 0.1;
+
+  return (
+    <svg viewBox="0 0 192 140" style={{ width:"100%", height:"auto", display:"block", imageRendering:"pixelated" }}
+      shapeRendering="crispEdges">
+      <defs>
+        <radialGradient id="lamp" cx="50%" cy="38%" r="65%">
+          <stop offset="0%" stopColor={`rgba(255,214,120,${ambient})`} />
+          <stop offset="100%" stopColor="rgba(255,214,120,0)" />
+        </radialGradient>
+      </defs>
+
+      {/* ---- back wall ---- */}
+      <rect x="0" y="0" width="192" height="104" fill="#caa884" />
+      {/* wall plank seams */}
+      {[16,40,64,88].map(yy=> <Px key={yy} x={0} y={yy} w={192} h={1} c="#b8966f" />)}
+      {/* wall base trim */}
+      <rect x="0" y="100" width="192" height="4" fill="#8a6a48" />
+
+      {/* ---- wood floor ---- */}
+      <rect x="0" y="104" width="192" height="36" fill="#9a6f42" />
+      {[...Array(8)].map((_,i)=> <Px key={i} x={i*24} y={104} w={1} h={36} c="#82592f" />)}
+      {[114,124,134].map(yy=> <Px key={yy} x={0} y={yy} w={192} h={1} c="#8a6038" />)}
+
+      {/* warm lamp glow grows with fairy lights */}
+      <ellipse cx="96" cy="60" rx="110" ry="70" fill="url(#lamp)" />
+
+      {/* ---- FAIRY LIGHTS strung across the top of the wall ---- */}
+      <polyline points="6,12 50,18 96,12 142,18 186,12" fill="none" stroke="#6a5238" strokeWidth="1" />
+      {[...Array(6)].map((_,i)=>{
+        const on = i < litWall;
+        const xs=[14,42,70,98,126,162], ys=[15,18,16,18,16,14];
+        const lc=["#ff6a8a","#ffd23f","#6fe0a0","#4ac0e0","#c79bff","#ff9ec2"][i];
+        return (
+          <g key={i}>
+            <Px x={xs[i]} y={ys[i]} w={3} h={3} c={on?lc:"#9a8266"} opacity={on?1:0.7}>
+              {on && <animate attributeName="opacity" values="1;0.5;1" dur={`${1.6+i*0.3}s`} repeatCount="indefinite" />}
+            </Px>
+            {on && <Px x={xs[i]-1} y={ys[i]-1} w={5} h={5} c={lc} opacity={0.18} />}
+          </g>
+        );
+      })}
+
+      {/* ============ TROPHY SHELF (top-left, the star of this view) ============ */}
+      <g>
+        {/* shelf plank */}
+        <Px x={14} y={56} w={60} h={5} c="#6b4a2e" />
+        <Px x={14} y={56} w={60} h={1} c="#8a6038" />
+        <Px x={14} y={60} w={60} h={1} c="#4f3520" />
+        {/* brackets */}
+        <Px x={18} y={61} w={3} h={5} c="#4f3520" />
+        <Px x={67} y={61} w={3} h={5} c="#4f3520" />
+        {/* engraved label above the medals */}
+        <Px x={28} y={28} w={32} h={4} c="#7a5230" />
+        <text x="44" y="31.2" fontSize="2.8" fill="#ffe6a0" textAnchor="middle" fontFamily="monospace" letterSpacing="0.5">TROPHIES</text>
+        {/* medals standing on the shelf (sprite is 12w at scale 2; 5 fit cleanly) */}
+        {trophies > 0
+          ? [...Array(Math.min(trophies,5))].map((_,i)=>(
+              <g key={i}>
+                <PixelMap x={16 + i*11} y={36} scale={2} palette={MEDAL_SPRITE.pal} rows={MEDAL_SPRITE.rows} />
+                <Px x={18 + i*11} y={56} w={8} h={1} c="#4f3520" opacity="0.5" />
+              </g>
+            ))
+          : <text x="44" y="44" fontSize="3.4" fill="#8a6a48" textAnchor="middle" fontFamily="monospace">— earn 1000 XP —</text>}
+        {trophies > 5 && <text x="71" y="46" fontSize="3.4" fill="#ffd23f" fontFamily="monospace">+{trophies-5}</text>}
+      </g>
+
+      {/* ============ BOOKSHELF (top-right) ============ */}
+      <g>
+        <Px x={112} y={40} w={64} h={40} c="#5a3a22" />
+        <Px x={114} y={42} w={60} h={36} c="#3f2817" />
+        {[54,66].map(yy=> <Px key={yy} x={114} y={yy} w={60} h={2} c="#5a3a22" />)}
+        {[...Array(books)].map((_,i)=>{
+          const row=Math.floor(i/4), idx=i%4;
+          const bx=118+idx*14, by=44+row*12;
+          const cols=["#e0b84a","#d98c6a","#9ec47b","#7baee0","#c79bff","#ef8a6a","#e08aa8","#6fc04a","#4a8fe0","#ffd23f","#ff9ec2","#5fb04a"];
+          return <g key={i}>
+            <Px x={bx} y={by} w={5} h={10} c={cols[i%cols.length]} />
+            <Px x={bx} y={by} w={5} h={1} c="#ffffff" opacity="0.25" />
+          </g>;
+        })}
+        {books===0 && <text x="144" y="62" fontSize="3.4" fill="#8a6a48" textAnchor="middle" fontFamily="monospace">empty shelf</text>}
+      </g>
+
+      {/* ---- small window with garden peek (center wall) ---- */}
+      <g>
+        <Px x={84} y={40} w={24} h={22} c="#6b4a2e" />
+        <Px x={86} y={42} w={20} h={18} c="#9fd4f5" />
+        <Px x={86} y={52} w={20} h={8} c="#6cbf52" />{/* grass */}
+        {/* a flower or two if garden grown */}
+        {state.plants>0 && <Px x={90} y={50} w={2} h={3} c="#e8483f" />}
+        {state.plants>1 && <Px x={100} y={50} w={2} h={3} c="#ffc233" />}
+        <Px x={95} y={42} w={2} h={18} c="#6b4a2e" />
+        <Px x={84} y={50} w={24} h={2} c="#6b4a2e" />
+      </g>
+
+      {/* ============ GATCHA MACHINE on the floor (centerpiece) ============ */}
+      <g>
+        <Px x={84} y={98} w={24} h={10} c="#d23b5b" />   {/* base */}
+        <Px x={86} y={108} w={20} h={4} c="#a3243f" />
+        <Px x={88} y={82} w={16} h={18} c="#b8264a" />    {/* body */}
+        {/* glass globe */}
+        <Px x={87} y={74} w={18} h={14} c="#ff8aa8" />
+        <Px x={87} y={74} w={18} h={4} c="#ffd0dc" />      {/* shine */}
+        <Px x={86} y={78} w={1} h={8} c="#ffd0dc" opacity="0.7" />
+        {/* capsules */}
+        <Px x={90} y={80} w={3} h={3} c="#ffd23f" />
+        <Px x={96} y={82} w={3} h={3} c="#6fe0a0" />
+        <Px x={100} y={79} w={3} h={3} c="#4ac0e0" />
+        <Px x={93} y={84} w={3} h={3} c="#c79bff" />
+        {/* slot + knob */}
+        <Px x={93} y={90} w={6} h={4} c="#2b1018" />
+        <Px x={94} y={94} w={4} h={3} c="#ffd0dc" />
+        {/* n= readout */}
+        <Px x={86} y={100} w={20} h={5} c="#1a1322" opacity="0.6" />
+        <text x="96" y="103.8" fontSize="3.6" fill="#ffd23f" textAnchor="middle" fontFamily="monospace">n={state.shuffle.length}</text>
+      </g>
+
+      {/* ============ PIGGY BANK on the floor (left) ============ */}
+      <g>
+        <PixelMap x={34} y={92} scale={3} palette={{ p:"#ef8ab0", d:"#d2618e", e:"#2b1018", s:"#ffc0d8" }}
+          rows={[
+            "  pppp ",
+            " pppppp",
+            "ppspppp",
+            "ppppppp",
+            "ppppppp",
+            " e  e  ",
+          ]} />
+        {/* coin slot */}
+        <Px x={43} y={92} w={4} h={1} c="#d2618e" />
+        {/* coin readout */}
+        {state.coins>0 && (
+          <>
+            <Px x={36} y={110} w={28} h={5} c="#1a1322" opacity="0.55" />
+            <text x="50" y="113.8" fontSize="3.6" fill="#ffd23f" textAnchor="middle" fontFamily="monospace">{state.coins} saved</text>
+            <Px x={40} y={84} w={2} h={2} c="#ffd23f"><animate attributeName="opacity" values="1;0.2;1" dur="1.4s" repeatCount="indefinite" /></Px>
+          </>
+        )}
+      </g>
+
+      {/* ---- a little potted plant from the garden, brought inside ---- */}
+      {state.plants>0 && (
+        <g>
+          <Px x={156} y={96} w={12} h={8} c="#b8623a" />
+          <Px x={156} y={96} w={12} h={2} c="#d2794a" />
+          <Px x={161} y={88} w={2} h={8} c="#3f8f3a" />
+          <Px x={159} y={86} w={6} h={3} c="#6fc04a" />
+          <Px x={160} y={84} w={2} h={2} c="#e8483f" />
+        </g>
+      )}
+
+      {/* ---- a cozy rug ---- */}
+      <g>
+        <Px x={64} y={120} w={64} h={14} c="#a3445f" opacity="0.8" />
+        <Px x={68} y={123} w={56} h={8} c="#c0506a" opacity="0.7" />
+        <Px x={72} y={126} w={48} h={2} c="#e87a8a" opacity="0.6" />
+      </g>
+
+      {/* ============ EXIT DOOR (clickable: step outside) ============ */}
+      <g onClick={onExit} style={{ cursor:"pointer" }}>
+        <Px x={6} y={66} w={20} h={38} c="#7a4a28" />
+        <Px x={7} y={67} w={18} h={37} c="#9a5f34" />
+        <Px x={9} y={69} w={14} h={15} c="#84502c" />
+        <Px x={9} y={86} w={14} h={15} c="#84502c" />
+        <Px x={21} y={86} w={2} h={3} c="#ffd23f" /> {/* knob */}
+        <rect className="qr-door-hint" x="4" y="64" width="24" height="42" fill="none" stroke="#ffd23f" strokeWidth="1" opacity="0" />
+        <rect className="qr-door-label-bg" x="6" y="58" width="20" height="6" rx="1" fill="#1a1322" opacity="0" />
+        <text className="qr-door-label" x="16" y="62.4" fontSize="3.2" fill="#ffd23f" textAnchor="middle" fontFamily="monospace" opacity="0">EXIT</text>
+      </g>
+
+      {/* ---------- celebration flash ---------- */}
+      {flash && (
+        <text x="96" y="34" fontSize="9" textAnchor="middle"
+          fill={SECTIONS[flash.section].color} fontFamily="monospace" fontWeight="bold"
+          style={{ paintOrder:"stroke", stroke:"#1a1322", strokeWidth:0.8 }}>
+          +{SECTIONS[flash.section].label}!
+          <animate attributeName="y" values="34;22" dur="1.6s" />
+          <animate attributeName="opacity" values="1;1;0" dur="1.6s" />
+        </text>
+      )}
+    </svg>
+  );
+}
+function Stat({ c, label, v, sub }) {
+  return (
+    <div style={S.stat}>
+      <div style={{ ...S.statDot, background:c }} />
+      <div>
+        <div style={S.statV}>{v}{sub && <span style={S.statSub}> {sub}</span>}</div>
+        <div style={S.statL}>{label}</div>
+      </div>
+    </div>
+  );
+}
+function DetailCard({ title, color, children }) {
+  return (
+    <div style={{ ...S.detail, borderColor:color }}>
+      <div style={{ ...S.detailTitle, color }}>{title}</div>
+      <div>{children}</div>
+    </div>
+  );
+}
+
+/* ---------------- styles (bright pastel sunroom) ---------------- */
+const FONT = "'Courier New', ui-monospace, monospace";
+const INK = "#5a463a";       // cocoa text
+const INK_DIM = "#9a8470";   // muted cocoa
+const CORAL = "#ef8a6a";     // accent
+const S = {
+  shellLoading: { minHeight:300, display:"grid", placeItems:"center", color:INK_DIM, fontFamily:FONT, background:"#fdf6ec" },
+  shell: { fontFamily:FONT, background:"#fdf6ec", color:INK, maxWidth:560, margin:"0 auto", borderRadius:14, overflow:"hidden", border:"1px solid #ecdcc6" },
+  header: { padding:"16px 18px 8px", textAlign:"center" },
+  title: { fontSize:22, letterSpacing:6, fontWeight:700, color:CORAL },
+  sub: { fontSize:11, color:INK_DIM, marginTop:2, letterSpacing:1 },
+  stage: { padding:"4px 12px 0", background:"radial-gradient(120% 90% at 50% 18%, #fffaf0, #fbeed9)" },
+  stats: { display:"flex", gap:6, padding:"10px 12px", flexWrap:"wrap", justifyContent:"center", background:"#fbeed9" },
+  stat: { display:"flex", alignItems:"center", gap:6, background:"#fffaf0", padding:"6px 10px", borderRadius:8, minWidth:78, border:"1px solid #f0e1cb" },
+  statDot: { width:8, height:8, borderRadius:2 },
+  statV: { fontSize:14, fontWeight:700 },
+  statSub: { fontSize:10, color:INK_DIM },
+  statL: { fontSize:9, color:INK_DIM, letterSpacing:1, textTransform:"uppercase" },
+  tabs: { display:"flex", gap:4, padding:"4px 12px 0", background:"#fbeed9" },
+  tab: { flex:1, padding:"10px 6px", background:"#f3e6d2", color:INK_DIM, border:"none", borderRadius:"8px 8px 0 0", fontFamily:FONT, fontSize:12, cursor:"pointer", letterSpacing:1 },
+  tabActive: { background:"#fff7eb", color:CORAL, fontWeight:700 },
+  panel: { padding:"16px 16px 20px", background:"#fff7eb", minHeight:180 },
+  lead: { fontSize:13, color:INK, margin:"0 0 12px", lineHeight:1.5 },
+  secGrid: { display:"flex", flexWrap:"wrap", gap:6, marginBottom:10 },
+  secChip: { padding:"7px 12px", borderRadius:20, border:"1.5px solid", background:"transparent", fontFamily:FONT, fontSize:12, cursor:"pointer", fontWeight:600 },
+  rewardHint: { fontSize:11, color:INK_DIM, margin:"0 0 12px", fontStyle:"italic" },
+  textarea: { width:"100%", boxSizing:"border-box", minHeight:64, background:"#fffdf8", color:INK, border:"1px solid #e7d4ba", borderRadius:8, padding:10, fontFamily:FONT, fontSize:13, resize:"vertical" },
+  primaryBtn: { marginTop:12, padding:"11px 18px", background:CORAL, color:"#fff", border:"none", borderRadius:8, fontFamily:FONT, fontWeight:700, fontSize:13, cursor:"pointer", letterSpacing:1 },
+  ghostBtn: { marginTop:12, padding:"11px 16px", background:"transparent", color:INK, border:"1px solid #d8c2a4", borderRadius:8, fontFamily:FONT, fontSize:12, cursor:"pointer" },
+  pending: { marginTop:18, paddingTop:14, borderTop:"1px dashed #e0cdb0" },
+  pendingHead: { fontSize:12, color:INK_DIM, marginBottom:8 },
+  pendCount: { display:"inline-block", margin:"0 6px 6px 0", padding:"3px 8px", border:"1px solid", borderRadius:6, fontSize:11 },
+  empty: { textAlign:"center", color:INK_DIM, padding:"30px 10px", fontSize:13, lineHeight:1.6 },
+  capsuleRow: { display:"flex", alignItems:"center", gap:14, background:"#fdf2e0", borderRadius:10, padding:14, marginBottom:14, border:"1px solid #f0e1cb" },
+  capsuleBig: { fontSize:26, fontWeight:700, color:CORAL, whiteSpace:"nowrap" },
+  capsuleNote: { fontSize:12, color:INK_DIM, lineHeight:1.5 },
+  row: { display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" },
+  numInput: { width:110, padding:"11px 12px", background:"#fffdf8", color:CORAL, border:"1px solid #e7d4ba", borderRadius:8, fontFamily:FONT, fontSize:18, fontWeight:700, textAlign:"center" },
+  input: { width:"100%", boxSizing:"border-box", padding:"11px 12px", background:"#fffdf8", color:INK, border:"1px solid #e7d4ba", borderRadius:8, fontFamily:FONT, fontSize:14, marginBottom:4 },
+  drawCard: { background:"#fdf2e0", borderRadius:12, padding:18, border:"1px solid #ecdcc6" },
+  drawTag: { display:"inline-block", padding:"3px 10px", border:"1px solid", borderRadius:6, fontSize:11, letterSpacing:1, marginBottom:10 },
+  drawText: { fontSize:18, lineHeight:1.4, marginBottom:6, color:INK },
+  rewardCard: { background:"#fdf2e0", borderRadius:12, padding:18, border:"1px solid #e6b84a" },
+  rewardTitle: { fontSize:16, color:CORAL, fontWeight:700, marginBottom:10 },
+  detailGrid: { display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 },
+  detail: { background:"#fdf2e0", borderRadius:10, padding:12, border:"1px solid", borderLeftWidth:4 },
+  detailTitle: { fontSize:12, fontWeight:700, letterSpacing:1, marginBottom:8, textTransform:"uppercase" },
+  listItem: { fontSize:12, color:INK, padding:"2px 0", lineHeight:1.4 },
+  bigNum: { fontSize:22, fontWeight:700, color:INK, marginBottom:4 },
+  dim: { color:INK_DIM, fontSize:11, fontWeight:400 },
+  plantRow: { fontSize:16, marginTop:4 },
+  footer: { padding:"10px 16px 16px", fontSize:10, color:INK_DIM, textAlign:"center", background:"#fff7eb", lineHeight:1.5 },
+};
+const CSS = `
+  * { -webkit-tap-highlight-color: transparent; }
+  button:focus-visible, input:focus-visible, textarea:focus-visible { outline:2px solid #ef8a6a; outline-offset:1px; }
+  @media (max-width:420px){ .qr-stat{min-width:64px;} }
+  @media (prefers-reduced-motion: reduce){ animate{ display:none; } }
+  g:hover > .qr-door-hint { opacity:0.9 !important; }
+  g:hover > .qr-door-label { opacity:1 !important; }
+  g:hover > .qr-door-label-bg { opacity:0.6 !important; }
+`;
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(QuestRoom));
+
+  </script>
+</body>
+</html>
